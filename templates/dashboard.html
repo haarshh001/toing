@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Toing Command Center</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#0a0f1c;--panel:#111a2e;--panel2:#0d1526;--border:#1e2b45;
+  --text:#e8eefc;--muted:#7d8bab;--cyan:#22d3ee;--green:#34d399;
+  --amber:#fbbf24;--red:#f87171;--violet:#a78bfa;--blue:#60a5fa;
+}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;
+  background-image:radial-gradient(900px 500px at 12% -10%,rgba(34,211,238,.10),transparent 70%),
+                   radial-gradient(700px 400px at 95% 0%,rgba(167,139,250,.09),transparent 70%)}
+.navbar{display:flex;align-items:center;gap:8px;padding:18px 36px;background:rgba(13,21,38,.85);
+  backdrop-filter:blur(14px);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:10}
+.brand{display:flex;align-items:center;gap:12px;font-size:21px;font-weight:800;letter-spacing:-.5px;margin-right:28px}
+.brand-mark{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--cyan),var(--violet));
+  display:grid;place-items:center;font-size:18px;box-shadow:0 6px 18px rgba(34,211,238,.25)}
+.brand span{background:linear-gradient(90deg,var(--cyan),var(--violet));-webkit-background-clip:text;color:transparent}
+.navbar a{color:var(--muted);text-decoration:none;padding:9px 16px;border-radius:10px;font-size:13px;font-weight:600;transition:.2s}
+.navbar a:hover{color:var(--text);background:rgba(255,255,255,.05)}
+.navbar a.active{color:var(--cyan);background:rgba(34,211,238,.1);box-shadow:inset 0 0 0 1px rgba(34,211,238,.2)}
+.wrap{max-width:1320px;margin:0 auto;padding:34px 36px 60px}
+.page-head{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:26px}
+.page-head h1{font-size:26px;font-weight:800;letter-spacing:-.8px}
+.page-head p{color:var(--muted);font-size:13px;margin-top:6px}
+.live{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);font-weight:600}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px rgba(52,211,153,.15);animation:pulse 2s infinite}
+@keyframes pulse{50%{box-shadow:0 0 0 8px rgba(52,211,153,0)}}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:14px;margin-bottom:22px}
+.stat{background:linear-gradient(160deg,var(--panel),var(--panel2));border:1px solid var(--border);
+  border-radius:16px;padding:18px 18px 16px;position:relative;overflow:hidden;transition:.2s}
+.stat:hover{transform:translateY(-3px);border-color:rgba(34,211,238,.35)}
+.stat::after{content:'';position:absolute;right:-18px;top:-18px;width:70px;height:70px;border-radius:50%;background:var(--tint,rgba(34,211,238,.07));filter:blur(6px)}
+.stat .lbl{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);font-weight:700}
+.stat .val{font-size:29px;font-weight:800;margin-top:8px;font-family:'JetBrains Mono',monospace;letter-spacing:-1px}
+.stat .sub{font-size:11px;color:var(--muted);margin-top:4px}
+.c-cyan{color:var(--cyan)}.c-green{color:var(--green)}.c-amber{color:var(--amber)}
+.c-red{color:var(--red)}.c-violet{color:var(--violet)}.c-blue{color:var(--blue)}
+.card{background:linear-gradient(160deg,var(--panel),var(--panel2));border:1px solid var(--border);
+  border-radius:18px;padding:24px;margin-bottom:22px;box-shadow:0 10px 30px rgba(0,0,0,.18)}
+.card h3{font-size:15px;font-weight:700;margin-bottom:6px;display:flex;align-items:center;gap:9px}
+.card .hint{color:var(--muted);font-size:12px;margin-bottom:18px;line-height:1.6}
+.field{display:flex;flex-direction:column;gap:7px}
+.field label{font-size:11px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);font-weight:700}
+input{background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:12px 14px;
+  border-radius:11px;font-size:15px;font-family:'JetBrains Mono',monospace;outline:none;transition:.2s}
+input:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(34,211,238,.12)}
+.controls{display:grid;grid-template-columns:1fr 1fr auto auto;gap:16px;align-items:end}
+.btn{padding:12px 22px;border:none;border-radius:11px;font-weight:800;font-size:13px;cursor:pointer;transition:.2s;white-space:nowrap}
+.btn:hover{transform:translateY(-2px);filter:brightness(1.08)}
+.btn-start{background:linear-gradient(135deg,#34d399,#10b981);color:#06281c;box-shadow:0 8px 22px rgba(52,211,153,.22)}
+.btn-stop{background:linear-gradient(135deg,#f87171,#ef4444);color:#fff;box-shadow:0 8px 22px rgba(248,113,113,.18)}
+.progress{height:8px;background:rgba(255,255,255,.05);border-radius:99px;overflow:hidden;margin-top:14px}
+.progress i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--cyan),var(--green));transition:width .4s}
+.grid2{display:grid;grid-template-columns:1.15fr .85fr;gap:22px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{text-align:left;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:1px;padding:9px 10px;border-bottom:1px solid var(--border)}
+td{padding:10px;border-bottom:1px solid rgba(30,43,69,.55);font-family:'JetBrains Mono',monospace}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:99px;font-size:10px;font-weight:800;
+  background:rgba(52,211,153,.12);color:var(--green)}
+.empty{padding:36px 10px;text-align:center;color:var(--muted);font-size:13px}
+.logs{height:430px;overflow:auto;background:#070c17;border:1px solid var(--border);border-radius:12px;
+  padding:12px;font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.65;white-space:pre-wrap}
+.logs div{padding:1px 0}
+.WIN{color:var(--green);font-weight:700}.NOREWARD{color:var(--amber)}.HIT{color:var(--cyan)}
+.SKIP{color:var(--violet)}.ERROR{color:var(--red)}.OTPFAIL{color:var(--red)}.INFO{color:#93a1bf}
+#msg{margin-top:13px;font-size:12.5px;min-height:18px;font-family:'Inter',sans-serif}
+@media(max-width:900px){.controls{grid-template-columns:1fr 1fr}.grid2{grid-template-columns:1fr}.wrap{padding:22px 18px}}
+</style>
+</head>
+<body>
+<nav class="navbar">
+  <div class="brand"><div class="brand-mark">🎯</div><span>Toing</span> Command</div>
+  <a href="/" class="active">Dashboard</a><a href="/logs">Logs</a><a href="/hits">Hits</a>
+  <a href="/firebases">Firebase</a><a href="/settings">Settings</a>
+</nav>
+
+<div class="wrap">
+  <div class="page-head">
+    <div><h1>Referral Command Center</h1><p>Automated Swiggy / Toing referral campaign controller</p></div>
+    <div class="live"><span class="dot"></span> SYSTEM ONLINE</div>
+  </div>
+
+  <div class="stats">
+    <div class="stat" style="--tint:rgba(96,165,250,.12)"><div class="lbl">Firebase Links</div><div class="val c-blue">{{ link_count }}</div><div class="sub">databases loaded</div></div>
+    <div class="stat" style="--tint:rgba(167,139,250,.12)"><div class="lbl">Active Instances</div><div class="val c-violet">{{ instances|selectattr("status","equalto","Running")|list|length }}<span style="font-size:16px;color:var(--muted)"> / {{ instances|length }}</span></div><div class="sub">parallel workers</div></div>
+    <div class="stat" style="--tint:rgba(52,211,153,.12)"><div class="lbl">Cash Wins Today</div><div class="val c-green">{{ stats.cash }}</div><div class="sub">₹50 earned</div></div>
+    <div class="stat" style="--tint:rgba(251,191,36,.12)"><div class="lbl">Run Target</div><div class="val c-amber">{% if target %}{{ target }}{% else %}—{% endif %}</div><div class="sub">accounts this run</div></div>
+    <div class="stat" style="--tint:rgba(34,211,238,.12)"><div class="lbl">Tries Today</div><div class="val c-cyan">{{ stats.tries }}</div><div class="sub">attempts made</div></div>
+    <div class="stat" style="--tint:rgba(248,113,113,.12)"><div class="lbl">Already Claimed</div><div class="val c-red">{{ stats.already }}</div><div class="sub">skipped numbers</div></div>
+    <div class="stat" style="--tint:rgba(248,113,113,.1)"><div class="lbl">Skipped Devices</div><div class="val c-red">{{ stats.skipped_devices }}</div><div class="sub">Toing SMS present</div></div>
+    <div class="stat" style="--tint:rgba(248,113,113,.08)"><div class="lbl">Inactive DBs</div><div class="val c-red">{{ stats.skipped_dbs }}</div><div class="sub">skipped this run</div></div>
+    <div class="stat" style="--tint:rgba(125,139,171,.1)"><div class="lbl">Offline Skipped</div><div class="val" style="color:var(--muted)">{{ stats.skipped_offline }}</div><div class="sub">online-only filter</div></div>
+    <div class="stat" style="--tint:rgba(34,211,238,.1)"><div class="lbl">Active Code</div><div class="val c-cyan" style="font-size:17px">{{ referral }}</div><div class="sub">referral in use</div></div>
+  </div>
+
+  <div class="card">
+    <h3>⚡ Worker Control</h3>
+    <p class="hint">Set how many cash-earning accounts you need and how many parallel instances to use — every time you start. Firebase order is shuffled on every run — and again inside each instance's slice — so instance 1 never sees the same databases in the same order. Inactive/deactivated databases are skipped automatically. When the target is reached, all workers stop and the instance list is cleared.</p>
+    <div class="controls">
+      <div class="field"><label>Accounts needed (cash wins)</label><input type="number" id="accounts" min="1" value="1" placeholder="e.g. 5"></div>
+      <div class="field"><label>Parallel instances</label><input type="number" id="inst" min="1" max="500" value="10" placeholder="e.g. 15"></div>
+      <button class="btn btn-start" onclick="startWorkers()">▶ Start All</button>
+      <button class="btn btn-stop" onclick="stopWorkers()">■ Stop &amp; Clear</button>
+    </div>
+    <div class="progress"><i style="width:{% if target %}{{ (stats.cash * 100 // target) if target else 0 }}{% else %}0{% endif %}%"></i></div>
+    <div id="msg"></div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h3>🖥 Parallel Worker Instances</h3>
+      <p class="hint">Each instance scans its own slice of the Firebase list independently.</p>
+      <table><thead><tr><th>ID</th><th>Link Range</th><th>Status</th></tr></thead><tbody>
+      {% for i in instances %}
+      <tr><td>#{{ i.id }}</td><td>{{ i.start }} — {{ i.end }}</td><td><span class="pill">{{ i.status }}</span></td></tr>
+      {% else %}<tr><td colspan="3" class="empty">No instances yet. Set the numbers above and press Start All.</td></tr>{% endfor %}
+      </tbody></table>
+    </div>
+    <div class="card">
+      <h3>📡 Live Activity</h3>
+      <p class="hint">Auto-refreshing event stream.</p>
+      <div class="logs" id="logs"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+function refresh(){
+  fetch('/api/logs').then(r=>r.json()).then(logs=>{
+    document.getElementById('logs').innerHTML=logs.slice(-150).reverse().map(l=>{
+      let c='INFO';
+      if(l.includes('[OTPFAIL]')||l.includes('[ERROR]'))c='ERROR';
+      else if(l.includes('[WIN]'))c='WIN';
+      else if(l.includes('[ALREADY]')||l.includes('[NOREWARD]'))c='NOREWARD';
+      else if(l.includes('[SKIP]'))c='SKIP';
+      else if(l.includes('[OTP]')||l.includes('[HIT]'))c='HIT';
+      const s=l.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return '<div class="'+c+'">'+s+'</div>';
+    }).join('');
+  });
+}
+function startWorkers(){
+  const accounts=parseInt(document.getElementById('accounts').value)||0;
+  const instances=parseInt(document.getElementById('inst').value)||0;
+  const m=document.getElementById('msg');
+  if(accounts<1||instances<1){m.style.color='var(--amber)';m.textContent='⚠ Enter both numbers (at least 1).';return;}
+  m.style.color='var(--muted)';m.textContent='⏳ Starting '+instances+' instances for '+accounts+' accounts...';
+  fetch('/api/workers/start',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({accounts:accounts,instances:instances})})
+   .then(r=>r.json()).then(d=>{
+     if(d.status==='success'){m.style.color='var(--green)';m.textContent='✓ '+d.instances+' instances started — target '+d.target+'.';setTimeout(()=>location.reload(),700);}
+     else{m.style.color='var(--red)';m.textContent='✕ '+(d.message||'Failed');}
+   });
+}
+function stopWorkers(){
+  if(!confirm('Stop all workers and remove all instances?'))return;
+  fetch('/api/workers/stop',{method:'POST'}).then(()=>location.reload());
+}
+refresh();setInterval(refresh,2000);
+</script>
+</body>
+</html>

