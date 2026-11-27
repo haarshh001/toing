@@ -60,6 +60,7 @@ DELETE_STATE_FILE = data_path("delete_state.json")
 DELETE_JOBS_FILE = data_path("delete_jobs.json")
 DELETE_PENDING_FILE = data_path("delete_pending.json")
 ONLINE_WATCHES_FILE = data_path("online_watches.json")
+OTP_COOLDOWN_FILE = data_path("otp_cooldown.json")
 os.makedirs(HITS_DIR, exist_ok=True)
 
 BASE = "https://profile.swiggy.com"
@@ -92,6 +93,9 @@ DEFAULTS = {
     # runtime
     "otp_timeout": 30,
     "otp_interval": 3,
+    "otp_retry": 5,          # retry sms_otp across rotating proxy exits
+    "otp_send_delay": 1.5,   # stagger OTP calls across workers
+    "otp_cooldown": 7200,    # per-number pause after Swiggy statusCode 9
     "request_timeout": 45,
     "sms_limit": 400,
     # delete automation
@@ -108,7 +112,8 @@ SECTIONS = {
     "telegram": ["tg_bot_token", "tg_chat_id"],
     "referral": ["referral_code", "campaign_id", "referrer_name", "account_name"],
     "firebase": ["firebase_secret", "firebase_timeout", "device_filter"],
-    "runtime": ["otp_timeout", "otp_interval", "request_timeout", "sms_limit"],
+    "runtime": ["otp_timeout", "otp_interval", "otp_retry", "otp_send_delay",
+                "otp_cooldown", "request_timeout", "sms_limit"],
     "delete": ["delete_account_enabled", "delete_otp_timeout",
                "delete_otp_interval", "delete_retry_default",
                "online_alert_interval", "online_alert_default"],
@@ -142,6 +147,10 @@ PENDING_LOCK = threading.Lock()
 WATCH_LOCK = threading.Lock()
 JOB_THREADS = {}
 WATCH_THREADS = {}
+
+# Per-number OTP cooldown (Swiggy statusCode 9 / rate limit)
+OTP_COOLDOWN = {}       # phone -> unix timestamp until which OTP is paused
+OTP_COOLDOWN_LOCK = threading.Lock()
 
 # Manual runner state (api_bot.py style: you enter the OTP yourself).
 MANUAL_SESSIONS = {}   # sid -> {phone, dev, tid, sid, ref, created, code/campaign}
@@ -459,6 +468,44 @@ def otp_send_ok(st, d):
             and bool(d.get("tid")) and bool(d.get("sid")))
 
 
+def send_otp_with_retry(phone, dev):
+    """Send OTP through the configured proxy, retrying across rotating exits.
+
+    Webshare rotates the exit IP per request: some exits return HTTP 403 with an
+    empty body, others work. Retry until a valid response arrives. Swiggy
+    statusCode 9 means the NUMBER is rate-limited -> cool it down for 2h.
+    Returns (st, raw, d). Never treats a proxy error as success.
+    """
+    left = otp_cooldown_left(phone)
+    if left > 0:
+        return None, "OTP cooldown: %ds left for %s" % (left, phone), {}
+
+    delay = float(get_setting("otp_send_delay", lambda x: float(x)) or 0)
+    if delay > 0:
+        time.sleep(delay * (0.5 + random.random()))
+
+    attempts = max(1, int(get_setting("otp_retry", int) or 1))
+    st, raw, d = None, "", {}
+    for i in range(attempts):
+        st, raw = swiggy_call("GET", BASE + "/api/v3/app/sms_otp?mobile=" + phone,
+                              base_headers(dev))
+        d = j(raw)
+        if otp_send_ok(st, d):
+            clear_otp_cooldown(phone)
+            return st, raw, d
+        code = d.get("statusCode")
+        if code == 9:
+            mark_otp_cooldown(phone)
+            log("    [-] OTP rate limit for %s - paused %ss"
+                % (phone, get_setting("otp_cooldown", int)), "OTPFAIL")
+            return st, raw, d
+        if i + 1 < attempts:
+            log("    [-] OTP attempt %d/%d failed for %s [HTTP %s] - retrying"
+                % (i + 1, attempts, phone, st), "OTPFAIL")
+            time.sleep(1.0 + i * 0.5)
+    return st, raw, d
+
+
 def user_check_ok(st, d):
     """delete/user_check success = HTTP 200 + statusCode in (28, 0) + sid."""
     return (st == 200 and isinstance(d, dict)
@@ -694,8 +741,7 @@ def run_number(db, device_id, phone):
     dev = new_device()
     baseline = last_msg_key(db, device_id)
     h = base_headers(dev)
-    st, raw = swiggy_call("GET", BASE + "/api/v3/app/sms_otp?mobile=" + phone, h)
-    d = j(raw)
+    st, raw, d = send_otp_with_retry(phone, dev)
     if not otp_send_ok(st, d):
         record("otp_fail")
         log("    [-] sms_otp failed for %s [HTTP %s]: %s"
@@ -1005,6 +1051,37 @@ def save_delete_state():
     save_map(DELETE_STATE_FILE, DELETE_STATE)
 
 
+def load_otp_cooldown():
+    global OTP_COOLDOWN
+    OTP_COOLDOWN = load_map(OTP_COOLDOWN_FILE)
+
+
+def save_otp_cooldown():
+    save_map(OTP_COOLDOWN_FILE, OTP_COOLDOWN)
+
+
+def otp_cooldown_left(phone):
+    """Seconds remaining on this number's OTP pause (0 = allowed)."""
+    until = OTP_COOLDOWN.get(str(phone))
+    try:
+        return max(0, int(float(until)) - int(time.time()))
+    except Exception:
+        return 0
+
+
+def mark_otp_cooldown(phone):
+    secs = int(get_setting("otp_cooldown", int) or 7200)
+    with OTP_COOLDOWN_LOCK:
+        OTP_COOLDOWN[str(phone)] = int(time.time()) + secs
+        save_otp_cooldown()
+
+
+def clear_otp_cooldown(phone):
+    with OTP_COOLDOWN_LOCK:
+        OTP_COOLDOWN.pop(str(phone), None)
+        save_otp_cooldown()
+
+
 def load_jobs():
     global DELETE_JOBS
     DELETE_JOBS = load_map(DELETE_JOBS_FILE)
@@ -1033,6 +1110,7 @@ def save_pending():
 
 
 load_hits()
+load_otp_cooldown()
 load_delete_state()
 load_jobs()
 load_pending()
@@ -1432,8 +1510,7 @@ def manual_start(phone, code=None, campaign=None):
         raise RuntimeError("Enter a valid 10-digit mobile number")
     dev = new_device()
     h = base_headers(dev)
-    st, raw = swiggy_call("GET", BASE + "/api/v3/app/sms_otp?mobile=" + phone, h)
-    d = j(raw)
+    st, raw, d = send_otp_with_retry(phone, dev)
     if not otp_send_ok(st, d):
         raise RuntimeError("[HTTP %s] %s" % (st, str(d.get("statusMessage") or raw)[:300]))
     ref = active_referral()
@@ -1911,8 +1988,10 @@ def api_proxy_probe():
         except Exception as exc:
             row["ip_error"] = "%s: %s" % (type(exc).__name__, str(exc)[:100])
         try:
-            r2 = http_request("GET", BASE + "/",
-                              headers={"user-agent": "Swiggy-Android"}, proxy=px,
+            # Root '/' returns 404 for everyone - probe a real API path instead.
+            r2 = http_request("GET", BASE + "/api/v2/app/login_check?mobile=9382771876",
+                              headers={"user-agent": "Swiggy-Android",
+                                       "accept": "application/json"}, proxy=px,
                               verify=get_setting("ssl_verify", bool), timeout=15)
             row["swiggy_http"] = r2.status_code
         except Exception as exc:

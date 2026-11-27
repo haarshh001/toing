@@ -107,6 +107,9 @@ input,select,textarea{width:100%;padding:9px 12px;background:#0f172a;color:#e2e8
   <div class="grid">
     <div><label>OTP poll timeout (s)</label><input type="number" data-setting="otp_timeout" data-type="int" value="{{ settings.otp_timeout }}"></div>
     <div><label>OTP poll interval (s)</label><input type="number" data-setting="otp_interval" data-type="int" value="{{ settings.otp_interval }}"></div>
+    <div><label>OTP send retries</label><input type="number" data-setting="otp_retry" data-type="int" value="{{ settings.otp_retry }}"></div>
+    <div><label>OTP send stagger delay (s)</label><input type="number" step="0.1" data-setting="otp_send_delay" data-type="float" value="{{ settings.otp_send_delay }}"></div>
+    <div><label>OTP cooldown after rate limit (s)</label><input type="number" data-setting="otp_cooldown" data-type="int" value="{{ settings.otp_cooldown }}"></div>
     <div><label>API request timeout (s)</label><input type="number" data-setting="request_timeout" data-type="int" value="{{ settings.request_timeout }}"></div>
     <div><label>Inbox SMS limit</label><input type="number" data-setting="sms_limit" data-type="int" value="{{ settings.sms_limit }}"></div>
   </div>
@@ -142,7 +145,7 @@ function collect(){
   const d={};
   document.querySelectorAll('[data-setting]').forEach(el=>{
     const k=el.dataset.setting,t=el.dataset.type;
-    if(t==='bool')d[k]=el.checked; else if(t==='int')d[k]=parseInt(el.value)||0; else d[k]=el.value;
+    if(t==='bool')d[k]=el.checked; else if(t==='int')d[k]=parseInt(el.value)||0; else if(t==='float')d[k]=parseFloat(el.value)||0; else d[k]=el.value;
   });
   return d;
 }
