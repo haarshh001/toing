@@ -1,7 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"><title>Toing Settings</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Toing Settings</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'Segoe UI',Tahoma,sans-serif;background:#0f172a;color:#e2e8f0}
@@ -25,12 +26,28 @@ input,select{width:100%;padding:9px 12px;background:#0f172a;color:#e2e8f0;border
 .codes{margin-top:14px}
 .code-row{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid #334155;font-size:13px}
 .code-row button{background:#38bdf8;color:#0f172a;border:none;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px}
-</style>
+@media(max-width:760px){
+  .navbar{padding:12px 14px;flex-wrap:wrap;gap:4px}
+  .navbar h1,.brand{width:100%;margin-bottom:4px}
+  .navbar a{padding:7px 9px;font-size:11px}
+  .container,.wrap{padding:18px 14px;margin:12px auto}
+  .box{height:70vh;font-size:11px;padding:10px}
+  .grid,.grid2,.stats{grid-template-columns:1fr!important}
+  .controls{grid-template-columns:1fr 1fr!important}
+  table{font-size:11px;display:block;overflow-x:auto}
+  th,td{padding:7px 6px}
+  .hit{padding:14px}
+  .actions,.btn-group{gap:6px}
+  .btn{padding:8px 10px;font-size:11px}
+  input,textarea{width:100%!important;font-size:14px}
+  .head,.page-head{flex-direction:column;align-items:flex-start;gap:10px}
+}</style>
 </head>
 <body>
 <nav class="navbar"><h1>🎯 Toing Dashboard</h1>
 <a href="/">Dashboard</a><a href="/logs">Logs</a><a href="/hits">Hits</a>
-<a href="/firebases">Firebase</a><a href="/settings" class="active">Settings</a></nav>
+<a href="/manual">Manual</a>
+  <a href="/firebases">Firebase</a><a href="/settings" class="active">Settings</a></nav>
 <div class="container">
 <div class="actions">
   <button class="btn" onclick="saveAll()">💾 Save All</button>

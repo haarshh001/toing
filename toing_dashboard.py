@@ -136,6 +136,11 @@ WATCH_LOCK = threading.Lock()
 JOB_THREADS = {}
 WATCH_THREADS = {}
 
+# Manual runner state (api_bot.py style: you enter the OTP yourself).
+MANUAL_SESSIONS = {}   # sid -> {phone, dev, tid, sid, ref, created, code/campaign}
+MANUAL_LOCK = threading.Lock()
+MANUAL_TTL = 900
+
 LOG_COLORS = {
     "INFO": "\x1b[90m",      # grey
     "ERROR": "\x1b[91m",     # red
@@ -1159,6 +1164,125 @@ def resume_automations():
             % (len(DELETE_JOBS), len(ONLINE_WATCHES)))
 
 
+# ─── Manual runner (api_bot.py style) ────────────────────────────────────
+def manual_prune():
+    now = time.time()
+    with MANUAL_LOCK:
+        for sid in [k for k, v in MANUAL_SESSIONS.items() if now - v.get("created", 0) > MANUAL_TTL]:
+            MANUAL_SESSIONS.pop(sid, None)
+
+
+def manual_start(phone, code=None, campaign=None):
+    """Step 1: send OTP via Swiggy API (proxy). Returns a manual session id."""
+    manual_prune()
+    phone = str(phone or "").strip()
+    if not re.fullmatch(r"[6-9]\d{9}", phone):
+        raise RuntimeError("Enter a valid 10-digit mobile number")
+    dev = new_device()
+    h = base_headers(dev)
+    st, raw = swiggy_call("GET", BASE + "/api/v3/app/sms_otp?mobile=" + phone, h)
+    d = j(raw)
+    if d.get("statusCode") not in (0, None):
+        raise RuntimeError(str(d.get("statusMessage") or raw)[:300])
+    ref = active_referral()
+    msid = uuid.uuid4().hex[:12]
+    with MANUAL_LOCK:
+        MANUAL_SESSIONS[msid] = {
+            "phone": phone, "dev": dev,
+            "tid": d.get("tid", ""), "sid": d.get("sid", ""),
+            "code": str(code or ref["code"]).strip().upper(),
+            "campaign": str(campaign or ref["campaign_id"]).strip(),
+            "created": time.time(),
+        }
+    log("[*] Manual OTP requested for %s (session %s)" % (phone, msid), "INFO")
+    return msid
+
+
+def manual_verify(msid, otp):
+    """Step 2: verify OTP, signup if needed, apply referral, return verdict + session."""
+    manual_prune()
+    with MANUAL_LOCK:
+        m = MANUAL_SESSIONS.get(msid)
+    if not m:
+        raise RuntimeError("Manual session expired. Request a new OTP.")
+    otp = str(otp or "").strip()
+    if not re.fullmatch(r"\d{6}", otp):
+        raise RuntimeError("OTP must be 6 digits")
+
+    phone, dev = m["phone"], m["dev"]
+    h = base_headers(dev, m["tid"], m["sid"])
+    st, raw = swiggy_call("POST", BASE + "/api/v3/app/login/verify?otp_source=Sms-automatic",
+                          h, {"cloningSignalsData": signals(), "otp": otp})
+    d = j(raw)
+    if d.get("statusCode") != 0:
+        raise RuntimeError(str(d.get("statusMessage") or raw)[:300])
+    prof = d.get("data", {}) or {}
+    token = prof.get("token") or ""
+    tid2 = d.get("tid") or m["tid"]
+    sid2 = d.get("sid") or m["sid"]
+
+    _, raw0 = swiggy_call("GET", BASE + "/api/v2/app/login_check?mobile=" + phone, h)
+    pre_reg = j(raw0).get("data", {}).get("registered")
+    if pre_reg is False:
+        h2 = base_headers(dev, tid2, sid2)
+        h2["token"] = token
+        su = {"cloningSignalsData": signals(),
+              "signUp": {"email": prof.get("email") or "", "mobile": phone,
+                         "name": get_setting("account_name", str)}}
+        _, rawsu = swiggy_call("POST", BASE + "/api/v3/app/signup", h2, su)
+        sd = j(rawsu)
+        if sd.get("statusCode") == 0:
+            prof = sd.get("data", {}) or prof
+            token = prof.get("token") or token
+            tid2 = sd.get("tid") or tid2
+            sid2 = sd.get("sid") or sid2
+
+    h3 = base_headers(dev, tid2, sid2)
+    h3["token"] = token
+    rb = {"referral_code": m["code"], "campaign_id": m["campaign"]}
+    _, raw1 = swiggy_call("POST", BASE + "/api/v1/referral/intrigue", h3, rb)
+    _, raw2 = swiggy_call("POST", BASE + "/api/v1/referral/reveal", h3, rb)
+    v, it, rv = verdict(raw1, raw2)
+
+    sess = {
+        "mobile": phone, "name": get_setting("account_name", str),
+        "token": token, "sid": sid2, "tid": tid2, "deviceId": dev,
+        "customerId": str(prof.get("customerId") or prof.get("customer_id")
+                          or extract_user_id(tid2) or ""),
+    }
+
+    if v.startswith("ALREADY") or v.startswith("OWN CODE"):
+        with MANUAL_LOCK:
+            MANUAL_SESSIONS.pop(msid, None)
+        return {"verdict": v, "session": None,
+                "message": "Already claimed / own code - no session saved",
+                "title": str(rv.get("title") or "")}
+
+    if v.startswith("REFERRAL CASH") or v.startswith("REFERRED"):
+        path = save_session(phone, sess, "manual", dev, v)
+        send_telegram(
+            "🧾 <b>TOING MANUAL %s</b>\n"
+            "📱 Number: <code>%s</code>\n"
+            "🔑 Code: <code>%s</code>\n"
+            "🎁 %s\n"
+            "💾 Session: <code>%s</code>"
+            % ("CASH EARNED" if v.startswith("REFERRAL CASH") else "REFERRED",
+               phone, html.escape(m["code"]), html.escape(v),
+               html.escape(os.path.basename(path)))
+        )
+        log("[*] Manual %s for %s - session saved" % (v, phone), "WIN")
+        with MANUAL_LOCK:
+            MANUAL_SESSIONS.pop(msid, None)
+        return {"verdict": v, "session": sess, "session_file": os.path.basename(path),
+                "message": "Success - session saved and sent to Telegram",
+                "title": str(rv.get("title") or "")}
+
+    with MANUAL_LOCK:
+        MANUAL_SESSIONS.pop(msid, None)
+    return {"verdict": v, "session": None,
+            "message": "Unknown result - inspect raw", "title": str(rv.get("title") or "")}
+
+
 # ─── Dashboard routes ────────────────────────────────────────────────────
 @app.route("/health")
 def health():
@@ -1228,6 +1352,33 @@ def settings_page():
     data = dict(DEFAULTS)
     data.update(load_settings())
     return render_template("settings.html", settings=data, sections=SECTIONS)
+
+
+@app.route("/manual")
+def manual_page():
+    return render_template("manual.html", code=get_setting("referral_code", str),
+                           campaign=get_setting("campaign_id", str))
+
+
+@app.route("/api/manual/start", methods=["POST"])
+def api_manual_start():
+    data = request.json or {}
+    try:
+        msid = manual_start(data.get("phone", ""), data.get("code", ""),
+                            data.get("campaign", ""))
+        return jsonify({"status": "success", "session_id": msid})
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)})
+
+
+@app.route("/api/manual/verify", methods=["POST"])
+def api_manual_verify():
+    data = request.json or {}
+    try:
+        result = manual_verify(data.get("session_id", ""), data.get("otp", ""))
+        return jsonify({"status": "success", **result})
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)})
 
 
 @app.route("/api/logs")
@@ -1549,10 +1700,11 @@ def dry_run():
     log("Sharding: 23 DBs into 7 instances covers all 23")
 
     c = app.test_client()
-    for path in ("/", "/logs", "/hits", "/firebases", "/settings", "/health"):
+    for path in ("/", "/logs", "/hits", "/firebases", "/settings", "/manual", "/health"):
         r = c.get(path)
         assert r.status_code == 200 and len(r.data) > 0, path
-    log("All dashboard routes OK")
+    assert callable(manual_start) and callable(manual_verify)
+    log("All dashboard routes (incl. Manual) OK")
     log("=== DRY RUN PASSED ===")
 
 

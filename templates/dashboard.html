@@ -73,12 +73,26 @@ td{padding:10px;border-bottom:1px solid rgba(30,43,69,.55);font-family:'JetBrain
 .SKIP{color:var(--violet)}.ERROR{color:var(--red)}.OTPFAIL{color:var(--red)}.INFO{color:#93a1bf}
 #msg{margin-top:13px;font-size:12.5px;min-height:18px;font-family:'Inter',sans-serif}
 @media(max-width:900px){.controls{grid-template-columns:1fr 1fr}.grid2{grid-template-columns:1fr}.wrap{padding:22px 18px}}
+@media(max-width:600px){
+  .navbar{padding:12px 14px;flex-wrap:wrap;gap:4px}
+  .brand{width:100%;margin-bottom:4px}
+  .navbar a{padding:7px 9px;font-size:11px}
+  .stats{grid-template-columns:1fr 1fr!important}
+  .controls{grid-template-columns:1fr!important}
+  .wrap{padding:18px 14px}
+  table{display:block;overflow-x:auto;font-size:11px}
+  th,td{padding:7px 6px}
+  .page-head{flex-direction:column;align-items:flex-start;gap:8px}
+  .logs{height:60vh;font-size:11px}
+  input{width:100%!important}
+}
 </style>
 </head>
 <body>
 <nav class="navbar">
   <div class="brand"><div class="brand-mark">🎯</div><span>Toing</span> Command</div>
   <a href="/" class="active">Dashboard</a><a href="/logs">Logs</a><a href="/hits">Hits</a>
+  <a href="/manual">Manual</a>
   <a href="/firebases">Firebase</a><a href="/settings">Settings</a>
 </nav>
 
