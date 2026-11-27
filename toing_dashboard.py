@@ -614,8 +614,18 @@ def run_number(db, device_id, phone):
     _, raw1 = swiggy_call("POST", BASE + "/api/v1/referral/intrigue", h4, rb)
     _, raw2 = swiggy_call("POST", BASE + "/api/v1/referral/reveal", h4, rb)
     v, it, rv = verdict(raw1, raw2)
-    log("    [%s] %s -> %s" % (phone, v, str(rv.get("title") or "")[:120]),
-        "WIN" if v.startswith("REFERRAL CASH") else "INFO")
+    if v.startswith("REFERRAL CASH"):
+        tag, word = "WIN", "EARNED"
+    elif v.startswith("ALREADY"):
+        tag, word = "ALREADY", "ALREADY CLAIMED"
+    elif v.startswith("REFERRED"):
+        tag, word = "HIT", "REFERRED"
+    elif v.startswith("OWN CODE"):
+        tag, word = "ALREADY", "OWN CODE"
+    else:
+        tag, word = "INFO", "UNKNOWN"
+    log("    [%s] %s => %s | %s" % (phone, word, v,
+        str(rv.get("title") or it.get("title") or "")[:140]), tag)
 
     if not token:
         log("    [-] no token for %s - session not saved" % phone, "ERROR")
@@ -634,7 +644,6 @@ def run_number(db, device_id, phone):
 
     if v.startswith("ALREADY"):
         record("already")
-        log("    [~] ALREADY CLAIMED %s - no session saved" % phone, "ALREADY")
         return v
     if v.startswith("REFERRAL CASH"):
         record("cash")
