@@ -327,7 +327,7 @@ def messages_url(db, device_id, limit=None):
 
 def fb_get(url):
     try:
-        r = requests.get(url, timeout=get_setting("firebase_timeout", int))
+        r = http_request("GET", url, timeout=get_setting("firebase_timeout", int))
         if r.status_code == 200:
             return r.json()
     except Exception:
@@ -350,23 +350,47 @@ def send_telegram(message):
         return False
 
 
+# ─── HTTP helper: explicit proxy only, never inherited env proxies ───────
+def http_request(method, url, headers=None, json_body=None, proxy=None,
+                 verify=True, timeout=30):
+    """One HTTP entry point. trust_env=False means an empty proxy is truly
+    DIRECT (no HTTP_PROXY/HTTPS_PROXY from the host). Set proxy -> use it."""
+    s = requests.Session()
+    s.trust_env = False
+    if proxy:
+        s.proxies.update({"http": proxy, "https": proxy})
+    kwargs = {"headers": headers or {}, "timeout": timeout, "verify": verify}
+    if json_body is not None:
+        kwargs["json"] = json_body
+    return s.request(method, url, **kwargs)
+
+
 # ─── Toing API helpers (proxy applies HERE only) ─────────────────────────
 def swiggy_call(method, url, headers, body=None):
     proxy = get_setting("proxy", str).strip()
-    proxies = {"http": proxy, "https": proxy} if proxy else None
-    kwargs = {
-        "headers": headers,
-        "timeout": get_setting("request_timeout", int),
-        "proxies": proxies,
-        "verify": get_setting("ssl_verify", bool),
-    }
-    if body is not None:
-        kwargs["json"] = body
     try:
-        r = requests.request(method, url, **kwargs)
+        r = http_request(method, url, headers=headers, json_body=body, proxy=proxy,
+                         verify=get_setting("ssl_verify", bool),
+                         timeout=get_setting("request_timeout", int))
         return r.status_code, r.text
     except Exception as exc:
         return None, "%s: %s" % (type(exc).__name__, exc)
+
+
+def otp_send_ok(st, d):
+    """sms_otp success = HTTP 200 + statusCode 0 + tid AND sid present.
+
+    A proxy error/timeout returns st=None and d={}; an HTTP 403 with an HTML
+    body returns st=403 and d={}. Both fail here -> never 'OTP sent'.
+    """
+    return (st == 200 and isinstance(d, dict) and d.get("statusCode") == 0
+            and bool(d.get("tid")) and bool(d.get("sid")))
+
+
+def user_check_ok(st, d):
+    """delete/user_check success = HTTP 200 + statusCode in (28, 0) + sid."""
+    return (st == 200 and isinstance(d, dict)
+            and d.get("statusCode") in (28, 0) and bool(d.get("sid")))
 
 
 def new_device():
@@ -437,10 +461,18 @@ def verdict(intrigue_raw, reveal_raw):
     rvj = j(reveal_raw)
     rv = rvj.get("data", {}).get("error_data", {}) or {}
     title, rtitle = it.get("title") or "", rv.get("title") or ""
-    if "already claimed" in rtitle.lower():
+    # Match against the whole visible message, not just one field, so a
+    # rejection phrase in statusMessage is classified too.
+    blob = " ".join(str(x) for x in
+                    (title, rtitle, rvj.get("statusMessage") or "")).lower()
+    if "already claimed" in blob or "claimed this ticket" in blob:
         return "ALREADY CLAIMED", it, rv
-    if "own link" in rtitle.lower():
+    if "own link" in blob:
         return "OWN CODE", it, rv
+    # From a live run: reveal title "You seem to be enjoying Toing already!"
+    # when this account has already used the referral cash on an order.
+    if "enjoying toing already" in blob or "used referral cash" in blob:
+        return "ALREADY CLAIMED (CASH USED)", it, rv
     if " has referred you" in title:
         return "REFERRED: " + title.replace(" has referred you!", ""), it, rv
     if rvj.get("statusCode") == 0 and not rtitle:
@@ -591,9 +623,10 @@ def run_number(db, device_id, phone):
     h = base_headers(dev)
     st, raw = swiggy_call("GET", BASE + "/api/v3/app/sms_otp?mobile=" + phone, h)
     d = j(raw)
-    if d.get("statusCode") not in (0, None):
+    if not otp_send_ok(st, d):
         record("otp_fail")
-        log("    [-] sms_otp failed for %s: %s" % (phone, str(d.get("statusMessage") or raw)[:180]), "OTPFAIL")
+        log("    [-] sms_otp failed for %s [HTTP %s]: %s"
+            % (phone, st, str(d.get("statusMessage") or raw)[:180]), "OTPFAIL")
         return "OTP_FAIL"
     tid, sid = d.get("tid", ""), d.get("sid", "")
     otp = poll_otp(db, device_id, baseline,
@@ -608,9 +641,10 @@ def run_number(db, device_id, phone):
     st, raw = swiggy_call("POST", BASE + "/api/v3/app/login/verify?otp_source=Sms-automatic",
                           h2, {"cloningSignalsData": signals(), "otp": otp})
     d = j(raw)
-    if d.get("statusCode") != 0:
+    if st != 200 or d.get("statusCode") != 0:
         record("otp_fail")
-        log("    [-] verify failed for %s: %s" % (phone, str(d.get("statusMessage") or raw)[:180]), "OTPFAIL")
+        log("    [-] verify failed for %s [HTTP %s]: %s"
+            % (phone, st, str(d.get("statusMessage") or raw)[:180]), "OTPFAIL")
         return "VERIFY_FAIL"
     prof = d.get("data", {}) or {}
     token = prof.get("token") or ""
@@ -640,8 +674,12 @@ def run_number(db, device_id, phone):
     h4["token"] = token
     ref = active_referral()
     rb = {"referral_code": ref["code"], "campaign_id": ref["campaign_id"]}
-    _, raw1 = swiggy_call("POST", BASE + "/api/v1/referral/intrigue", h4, rb)
-    _, raw2 = swiggy_call("POST", BASE + "/api/v1/referral/reveal", h4, rb)
+    st1, raw1 = swiggy_call("POST", BASE + "/api/v1/referral/intrigue", h4, rb)
+    st2, raw2 = swiggy_call("POST", BASE + "/api/v1/referral/reveal", h4, rb)
+    if st1 != 200 or st2 != 200:
+        log("    [-] referral API failed [HTTP %s/%s]: %s"
+            % (st1, st2, str(raw1)[:160]), "ERROR")
+        return "REFERRAL_API_FAIL"
     v, it, rv = verdict(raw1, raw2)
     if v.startswith("REFERRAL CASH"):
         tag, word = "WIN", "EARNED"
@@ -985,7 +1023,7 @@ def attempt_delete(hit, verbose=True):
 
     baseline = last_msg_key(db, device_id)
     st, d, raw = delete_user_check(sess)
-    if d.get("statusCode") not in (28, 0, None):
+    if not user_check_ok(st, d):
         if verbose:
             log("Delete %s: user_check failed [%s] %s"
                 % (number, st, str(d.get("statusMessage") or raw)[:160]), "ERROR")
@@ -1182,8 +1220,8 @@ def manual_start(phone, code=None, campaign=None):
     h = base_headers(dev)
     st, raw = swiggy_call("GET", BASE + "/api/v3/app/sms_otp?mobile=" + phone, h)
     d = j(raw)
-    if d.get("statusCode") not in (0, None):
-        raise RuntimeError(str(d.get("statusMessage") or raw)[:300])
+    if not otp_send_ok(st, d):
+        raise RuntimeError("[HTTP %s] %s" % (st, str(d.get("statusMessage") or raw)[:300]))
     ref = active_referral()
     msid = uuid.uuid4().hex[:12]
     with MANUAL_LOCK:
@@ -1214,8 +1252,8 @@ def manual_verify(msid, otp):
     st, raw = swiggy_call("POST", BASE + "/api/v3/app/login/verify?otp_source=Sms-automatic",
                           h, {"cloningSignalsData": signals(), "otp": otp})
     d = j(raw)
-    if d.get("statusCode") != 0:
-        raise RuntimeError(str(d.get("statusMessage") or raw)[:300])
+    if st != 200 or d.get("statusCode") != 0:
+        raise RuntimeError("[HTTP %s] %s" % (st, str(d.get("statusMessage") or raw)[:300]))
     prof = d.get("data", {}) or {}
     token = prof.get("token") or ""
     tid2 = d.get("tid") or m["tid"]
@@ -1240,8 +1278,10 @@ def manual_verify(msid, otp):
     h3 = base_headers(dev, tid2, sid2)
     h3["token"] = token
     rb = {"referral_code": m["code"], "campaign_id": m["campaign"]}
-    _, raw1 = swiggy_call("POST", BASE + "/api/v1/referral/intrigue", h3, rb)
-    _, raw2 = swiggy_call("POST", BASE + "/api/v1/referral/reveal", h3, rb)
+    st1, raw1 = swiggy_call("POST", BASE + "/api/v1/referral/intrigue", h3, rb)
+    st2, raw2 = swiggy_call("POST", BASE + "/api/v1/referral/reveal", h3, rb)
+    if st1 != 200 or st2 != 200:
+        raise RuntimeError("[HTTP %s/%s] referral API failed" % (st1, st2))
     v, it, rv = verdict(raw1, raw2)
 
     sess = {
@@ -1622,7 +1662,13 @@ def dry_run():
     cash = verdict(json.dumps(j('{"data":{"intrigue_data":{"title":"Welcome"}}}')),
                    json.dumps(j('{"statusCode":0,"data":{"error_data":{}}}')))[0]
     assert cash.startswith("REFERRAL CASH")
-    log("Verdict: cash / already / referred classified")
+    used = verdict(json.dumps(j('{"data":{"intrigue_data":{"title":"Welcome"}}}')),
+                   json.dumps(j('{"statusCode":400,"statusMessage":"You seem to be enjoying Toing already!",'
+                                '"data":{"error_data":{"title":"You seem to be enjoying Toing already!"}}}')))[0]
+    assert used.startswith("ALREADY"), used
+    assert verdict(json.dumps(j('{"data":{"intrigue_data":{"title":"Welcome"}}}')),
+                   json.dumps(j('{"statusCode":400,"statusMessage":"You seem to be enjoying Toing already!"}')))[0].startswith("ALREADY")
+    log("Verdict: cash / already / referred / cash-used classified")
 
     assert is_toing_message({"sender": "VM-SWGTNG-S", "message": "Use OTP 123456 to log into your Toing account."})
     assert not is_toing_message({"sender": "TX-SWIGGY-S", "message": "This is a Swiggy login OTP 123456."})
@@ -1649,6 +1695,42 @@ def dry_run():
             assert key in h
     assert len(new_device()) == 16
     log("Headers + device id OK")
+
+    # A proxy error / timeout / HTTP 403 must NEVER be treated as "OTP sent".
+    # swiggy_call returns (None, "<ExcType>: msg") on exceptions, and
+    # (403, "<html>...") when Swiggy rejects the request. j() turns both into
+    # {}, so the old `statusCode not in (0, None)` check accepted them.
+    assert not otp_send_ok(None, {}), "proxy error accepted as OTP sent"
+    assert not otp_send_ok(None, j("ProxyError: tunnel connection failed"))
+    assert not otp_send_ok(403, j("<html>403 Forbidden</html>"))
+    assert not otp_send_ok(200, {"statusCode": 0}), "missing tid/sid accepted"
+    assert not otp_send_ok(200, {"statusCode": 1, "tid": "t", "sid": "s"})
+    assert otp_send_ok(200, {"statusCode": 0, "tid": "t", "sid": "s"})
+    assert not user_check_ok(None, {}), "proxy error accepted as delete OTP"
+    assert not user_check_ok(403, j("<html>403 Forbidden</html>"))
+    assert user_check_ok(200, {"statusCode": 28, "sid": "s"})
+    assert user_check_ok(200, {"statusCode": 0, "sid": "s"})
+    log("OTP-send guards: proxy error / HTTP 403 / missing tid-sid rejected OK")
+
+    # End-to-end: manual_start must reject each real failure mode.
+    orig_swiggy = globals()["swiggy_call"]
+    try:
+        for st, raw, label in (
+            (None, "ProxyError: HTTPSConnectionPool: Max retries exceeded", "proxy error"),
+            (None, "ReadTimeout: timed out", "timeout"),
+            (403, "<html><body>403 Forbidden</body></html>", "HTTP 403"),
+        ):
+            globals()["swiggy_call"] = (lambda _s, _r: (lambda *a, **k: (_s, _r)))(st, raw)
+            try:
+                manual_start("9999999999")
+                raise AssertionError("manual_start accepted %s as OTP sent" % label)
+            except RuntimeError:
+                pass  # expected - request correctly rejected
+    finally:
+        globals()["swiggy_call"] = orig_swiggy
+        with MANUAL_LOCK:
+            MANUAL_SESSIONS.clear()
+    log("Manual start rejects proxy error / timeout / HTTP 403 OK")
 
     # Delete flow: exact headers, OTP matcher, state persistence.
     dh = delete_headers({"token": "t", "sid": "s", "tid": "i", "deviceId": "d"})
