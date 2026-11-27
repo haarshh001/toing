@@ -92,6 +92,18 @@ input,select{width:100%;padding:9px 12px;background:#0f172a;color:#e2e8f0;border
 </div>
 
 <div class="card">
+  <div class="card-head"><h3>🗑 Delete &amp; Alerts</h3><button class="btn btn-red btn-sm" onclick="resetSection('delete')">Reset</button></div>
+  <div class="grid">
+    <div class="check"><input type="checkbox" data-setting="delete_account_enabled" data-type="bool" id="del_en" {% if settings.delete_account_enabled %}checked{% endif %}><label for="del_en">Enable account deletion</label></div>
+    <div><label>Archive OTP timeout (s)</label><input type="number" data-setting="delete_otp_timeout" data-type="int" value="{{ settings.delete_otp_timeout }}"></div>
+    <div><label>Archive OTP poll interval (s)</label><input type="number" data-setting="delete_otp_interval" data-type="int" value="{{ settings.delete_otp_interval }}"></div>
+    <div><label>Auto-delete retry default (s)</label><input type="number" data-setting="delete_retry_default" data-type="int" value="{{ settings.delete_retry_default }}"></div>
+    <div><label>Online alert poll interval (s)</label><input type="number" data-setting="online_alert_interval" data-type="int" value="{{ settings.online_alert_interval }}"></div>
+    <div><label>Online alert default duration (s)</label><input type="number" data-setting="online_alert_default" data-type="int" value="{{ settings.online_alert_default }}"></div>
+  </div>
+</div>
+
+<div class="card">
   <div class="card-head"><h3>📱 Telegram (direct)</h3><button class="btn btn-red btn-sm" onclick="resetSection('telegram')">Reset</button></div>
   <div class="grid">
     <div><label>Bot token</label><input type="text" data-setting="tg_bot_token" value="{{ settings.tg_bot_token }}"></div>

